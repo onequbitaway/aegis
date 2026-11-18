@@ -1,0 +1,26 @@
+name: Feature request
+description: Propose a new function or a change to AEGIS.
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: AEGIS ships defensive modules only. We do not accept offensive functions.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: Describe the problem that this change solves.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+      description: Describe the change that you propose.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives
+      description: Describe other solutions that you considered.
