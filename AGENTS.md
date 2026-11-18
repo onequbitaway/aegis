@@ -26,6 +26,11 @@ AEGIS is a defensive agentic security framework in Rust. Read `README.md` for th
 `rust-toolchain.toml` pins the Rust toolchain. Run all four checks before you report that a
 change is complete. CI runs the same commands.
 
+The tests with `--all-features` start disposable PostgreSQL and NATS containers, so Docker
+must run. They also build the example plugins for the `wasm32-wasip2` target, which
+`rust-toolchain.toml` installs. Without Docker, run `cargo test --workspace --locked`: it
+runs all tests that need no container.
+
 ```sh
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings

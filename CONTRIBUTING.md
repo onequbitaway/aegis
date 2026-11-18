@@ -35,6 +35,10 @@ Thank you for your interest in AEGIS. This document tells you how to contribute.
 
 Run these commands before you open a pull request. CI runs the same commands.
 
+The tests with `--all-features` start disposable PostgreSQL and NATS containers, so Docker
+must run. Without Docker, run `cargo test --workspace --locked`. That command runs all
+tests that need no container.
+
 ```sh
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
