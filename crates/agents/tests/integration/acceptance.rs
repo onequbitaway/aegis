@@ -6,10 +6,12 @@ use aegis_agents::ledger::{ActionState, tracked_actions};
 use aegis_agents::prompt::{DATA_END, DATA_START, data_sections, outside_data_sections};
 use aegis_agents::report::NarrativeSource;
 use aegis_agents::{RuntimeConfig, RuntimeState, TaskState};
-use aegis_contracts::action::{ActionDisposition, ActionKind, ActionRequest, ActionStatus};
+use aegis_contracts::action::{ActionKind, ActionRequest};
 use aegis_contracts::audit::{AuditKind, AuditLog};
 use aegis_contracts::bus::subject;
-use aegis_contracts::common::{EntityKind, EntityRef, EvidenceKind, EvidenceRef, Severity};
+use aegis_contracts::common::{
+    ApprovalId, EntityKind, EntityRef, EvidenceKind, EvidenceRef, Severity,
+};
 use aegis_contracts::event::{action, attr};
 use aegis_contracts::graph::{DefensiveGraph, Direction, NodeId, NodeKind, relation};
 use aegis_contracts::incident::{Incident, IncidentStatus, IncidentStore};
@@ -336,7 +338,8 @@ async fn an_attack_incident_goes_from_the_monitor_to_the_responder_in_a_dry_run(
         Some(&json!("credential-1"))
     );
 
-    // The bus has each request and each result.
+    // The bus has each request. The runtime does not publish the results: the dispatcher
+    // is the single publisher of `aegis.actions.results`.
     let published: Vec<ActionRequest> = bench
         .harness
         .bus
@@ -349,20 +352,17 @@ async fn an_attack_incident_goes_from_the_monitor_to_the_responder_in_a_dry_run(
         .map(|(request, _)| request.clone())
         .collect();
     assert_eq!(published, dispatched);
-    let results: Vec<ActionDisposition> = bench
-        .harness
-        .bus
-        .published_to(subject::ACTION_RESULTS)
-        .iter()
-        .map(|message| message.decode().unwrap())
-        .collect();
-    assert_eq!(results.len(), 6);
-    for (result, request) in results.iter().zip(&dispatched) {
-        assert!(
-            matches!(result, ActionDisposition::Executed(outcome)
-                if outcome.action_id == request.id && outcome.status == ActionStatus::Simulated),
-            "{result:?}"
-        );
+    assert_eq!(bench.harness.bus.published_to(subject::ACTION_RESULTS), []);
+    // Each agent got the result of its request: the timeline has the result of each one.
+    assert_eq!(dispatched.len(), 6);
+    for request in &dispatched {
+        let id = request.id.to_string();
+        let states: Vec<ActionState> = tracked
+            .iter()
+            .filter(|action| action.action_id == id)
+            .map(|action| action.state)
+            .collect();
+        assert_eq!(states, [ActionState::Simulated], "{:?}", request.kind);
     }
 
     // The report has the facts of the incident and the text of the model.
@@ -861,26 +861,18 @@ async fn a_denial_and_a_pending_approval_are_recorded_and_do_not_contain_the_inc
             .unwrap();
         assert_eq!(node.properties["status"], "investigating", "{mode:?}");
 
-        // The bus has the results, and the report says what a person must do.
-        let results: Vec<ActionDisposition> = bench
-            .harness
-            .bus
-            .published_to(subject::ACTION_RESULTS)
-            .iter()
-            .map(|message| message.decode().unwrap())
-            .collect();
-        assert_eq!(results.len(), 5, "{mode:?}");
+        // The runtime publishes no result. The report says what a person must do.
+        assert_eq!(
+            bench.harness.bus.published_to(subject::ACTION_RESULTS),
+            [],
+            "{mode:?}"
+        );
         let documents = reports(&bench, &incident);
         assert_eq!(documents.len(), 1, "{mode:?}");
         let report = &documents[0].report;
         assert_eq!(report.status, IncidentStatus::Investigating, "{mode:?}");
         match mode {
             DispatchMode::Deny => {
-                assert!(
-                    results
-                        .iter()
-                        .all(|result| matches!(result, ActionDisposition::Denied(_)))
-                );
                 assert_eq!(
                     report.recommendations,
                     [
@@ -890,16 +882,15 @@ async fn a_denial_and_a_pending_approval_are_recorded_and_do_not_contain_the_inc
                 );
             }
             DispatchMode::RequireApproval => {
-                let ActionDisposition::PendingApproval { approval_id, .. } = &results[3] else {
-                    panic!("the result must be a pending approval: {:?}", results[3]);
-                };
-                assert_eq!(
-                    responder[7],
-                    format!(
-                        "block_ip on ip_address:203.0.113.50: waits for approval {approval_id}. \
-                         The test dispatcher is in RequireApproval mode."
-                    )
-                );
+                // The entry names the approval request that the dispatcher made.
+                let approval_id = responder[7]
+                    .strip_prefix("block_ip on ip_address:203.0.113.50: waits for approval ")
+                    .and_then(|rest| {
+                        rest.strip_suffix(". The test dispatcher is in RequireApproval mode.")
+                    })
+                    .unwrap_or_else(|| panic!("the entry has a different form: {}", responder[7]));
+                let parsed: ApprovalId = approval_id.parse().unwrap();
+                assert_eq!(parsed.to_string(), approval_id);
                 assert_eq!(
                     report.recommendations,
                     ["Approve or reject the 5 actions that wait for approval."]

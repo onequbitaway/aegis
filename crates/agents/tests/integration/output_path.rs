@@ -109,7 +109,8 @@ async fn the_runtime_applies_each_part_of_an_agent_output() {
         Principal::new("monitor", PrincipalKind::Agent, &["monitor"])
     );
 
-    // The bus has the request and the result.
+    // The bus has the request. The runtime does not publish the result: the dispatcher is
+    // the single publisher of `aegis.actions.results`.
     let published: Vec<ActionRequest> = bench
         .harness
         .bus
@@ -119,15 +120,8 @@ async fn the_runtime_applies_each_part_of_an_agent_output() {
         .collect();
     assert_eq!(published.len(), 1);
     assert_eq!(published[0], *dispatched);
-    let results: Vec<ActionDisposition> = bench
-        .harness
-        .bus
-        .published_to(subject::ACTION_RESULTS)
-        .iter()
-        .map(|message| message.decode().unwrap())
-        .collect();
-    assert_eq!(results.len(), 1);
-    assert_eq!(bench.harness.bus.published().len(), 2);
+    assert_eq!(bench.harness.bus.published_to(subject::ACTION_RESULTS), []);
+    assert_eq!(bench.harness.bus.published().len(), 1);
 
     // The agent got the result as a task with the identifier of the action.
     let seen = monitor.seen();
@@ -137,15 +131,13 @@ async fn the_runtime_applies_each_part_of_an_agent_output() {
     assert_eq!(seen[1].to, AgentRole::Monitor);
     assert_eq!(seen[1].from, None);
     assert_eq!(seen[1].incident_id, Some(incident.id));
-    assert_eq!(
-        seen[1].input,
-        AgentInput::ActionResult(Box::new(results[0].clone()))
-    );
+    let AgentInput::ActionResult(result) = &seen[1].input else {
+        panic!("the task must hold an action result: {:?}", seen[1].input);
+    };
     assert!(
-        matches!(&results[0], ActionDisposition::Executed(outcome)
+        matches!(result.as_ref(), ActionDisposition::Executed(outcome)
             if outcome.action_id == action_id && outcome.status == ActionStatus::Simulated),
-        "{:?}",
-        results[0]
+        "{result:?}"
     );
 
     // The new task is in the queue of its role, with the real sender and the incident.

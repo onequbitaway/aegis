@@ -22,7 +22,7 @@ pub mod subject {
     pub const AGENT_TASKS: &str = "aegis.agents.tasks";
     /// Action requests from agents and playbooks. Payload: `ActionRequest`.
     pub const ACTION_REQUESTS: &str = "aegis.actions.requests";
-    /// Action results. Payload: `ActionDisposition`.
+    /// Action results. Payload: `ActionResult`. Only the action dispatcher publishes here.
     pub const ACTION_RESULTS: &str = "aegis.actions.results";
     /// New and decided approval requests. Payload: `ApprovalRequest`.
     pub const APPROVALS: &str = "aegis.approvals";
@@ -63,6 +63,14 @@ pub trait MessageBus: Send + Sync {
     /// starts at the first message that the bus holds. A consumer that starts again with
     /// the same name continues after its last message. Consumers that share one durable
     /// name share the messages: each message goes to one of them.
+    ///
+    /// One durable name reads one pattern. Use a different durable name for a different
+    /// pattern. An implementation can reject a durable name that already reads a
+    /// different pattern.
+    ///
+    /// Delivery to a durable consumer is at least once. A consumer can get a message more
+    /// than one time, for example after a restart. Make the handler of the messages
+    /// idempotent.
     async fn subscribe(&self, pattern: &str, durable: Option<&str>) -> Result<BusStream>;
 }
 

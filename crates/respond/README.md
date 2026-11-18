@@ -41,6 +41,11 @@ ActionRequest
 
 Each audit record links the action, its incident, and the evidence of the request.
 
+Each message on `aegis.actions.results` is an `aegis_contracts::ActionResult`. It holds the
+identifier of the request, the incident of the request, and the disposition. A denial and a
+pending approval do not hold the identifier of the request, so the message adds it. The
+dispatcher is the single publisher of this subject.
+
 ## Public API
 
 | Item | Function |
@@ -206,7 +211,7 @@ Request parameters:
 
 | Parameter | Use |
 | --- | --- |
-| `key_id` | The `keyId` of the password credential to remove. `revoke_credential` and `rotate_credential` need it. |
+| `key_id` | The `keyId` of the password credential to remove. `revoke_credential` and `rotate_credential` need it. The connector also reads the value from the parameter `credential_id`, which the Responder agent sets. |
 | `display_name` | The display name of the new credential of `rotate_credential`. Optional. |
 
 The connector refuses a target that names a tenant that is not `tenant_id` and is not in

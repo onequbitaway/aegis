@@ -11,8 +11,19 @@ repository = "https://github.com/onequbitaway/aegis"
 publish = false
 
 [workspace.dependencies]
+aegis-agents = { path = "crates/agents" }
+aegis-app = { path = "crates/app", default-features = false }
+aegis-bus = { path = "crates/bus" }
 aegis-contracts = { path = "crates/contracts" }
+aegis-core = { path = "crates/core" }
+aegis-detect = { path = "crates/detect" }
+aegis-ingest = { path = "crates/ingest" }
 aegis-memory = { path = "crates/memory" }
+aegis-model = { path = "crates/model" }
+aegis-plugin = { path = "crates/plugin" }
+aegis-policy = { path = "crates/policy" }
+aegis-respond = { path = "crates/respond" }
+aegis-storage = { path = "crates/storage" }
 aegis-testkit = { path = "crates/testkit" }
 
 anyhow = "1.0.104"

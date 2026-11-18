@@ -230,11 +230,13 @@ it as untrusted data.
 | `aegis.agents.tasks.{role}` | In (`run`) | `AgentTask`. The subject must name the role in the task. |
 | `aegis.incidents` | In (`run`) | `Incident` |
 | `aegis.actions.requests` | Out | `ActionRequest`, before the dispatch |
-| `aegis.actions.results` | Out | `ActionDisposition`, after the dispatch |
 | `aegis.reports.{incident identifier}` | Out | `agents::ReportDocument`: the report as a structure and as Markdown |
 
 `aegis.reports` is not in `aegis_contracts::bus::subject`. It is the constant
 `agents::REPORT_SUBJECT` of this crate.
+
+The runtime does not publish on `aegis.actions.results` and does not read that subject. The
+action dispatcher is the single publisher of the results (`aegis_contracts::ActionResult`).
 
 The runtime gives the result of each dispatch to the agent that proposed the action. The
 task with the result has the same UUID as the action request.

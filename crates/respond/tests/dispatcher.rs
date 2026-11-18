@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use aegis_contracts::action::{
     ActionConnector, ActionDispatcher, ActionDisposition, ActionKind, ActionOutcome, ActionRequest,
-    ActionStatus,
+    ActionResult, ActionStatus,
 };
 use aegis_contracts::audit::{AuditEntry, AuditKind, AuditLog, AuditRecord, ChainVerification};
 use aegis_contracts::bus::{BusStream, MessageBus, subject};
@@ -339,8 +339,12 @@ async fn an_allowed_action_runs_and_each_step_is_in_the_audit_log() {
     let results = stack.bus.published_to(subject::ACTION_RESULTS);
     assert_eq!(results.len(), 1);
     assert_eq!(
-        results[0].decode::<ActionDisposition>().unwrap(),
-        disposition
+        results[0].decode::<ActionResult>().unwrap(),
+        ActionResult {
+            action_id: action.id,
+            incident_id: Some(incident_id),
+            disposition,
+        }
     );
 }
 
@@ -374,11 +378,16 @@ async fn a_denied_action_does_not_reach_a_connector() {
         "Policy denies the action disable_service_principal on service_principal sp-sync-helper."
     );
     assert!(stack.approvals.pending().await.unwrap().is_empty());
+    // A denial and a pending approval hold no action identifier. The result adds it.
     let results = stack.bus.published_to(subject::ACTION_RESULTS);
     assert_eq!(results.len(), 1);
     assert_eq!(
-        results[0].decode::<ActionDisposition>().unwrap(),
-        disposition
+        results[0].decode::<ActionResult>().unwrap(),
+        ActionResult {
+            action_id: action.id,
+            incident_id: None,
+            disposition,
+        }
     );
 }
 
@@ -423,11 +432,16 @@ async fn a_gated_action_waits_in_the_approval_queue() {
     let announced = stack.bus.published_to(subject::APPROVALS);
     assert_eq!(announced.len(), 1);
     assert_eq!(announced[0].decode::<ApprovalRequest>().unwrap(), queued[0]);
+    // A denial and a pending approval hold no action identifier. The result adds it.
     let results = stack.bus.published_to(subject::ACTION_RESULTS);
     assert_eq!(results.len(), 1);
     assert_eq!(
-        results[0].decode::<ActionDisposition>().unwrap(),
-        disposition
+        results[0].decode::<ActionResult>().unwrap(),
+        ActionResult {
+            action_id: action.id,
+            incident_id: None,
+            disposition,
+        }
     );
 }
 
@@ -900,8 +914,10 @@ async fn a_connector_error_is_in_the_audit_log_and_goes_to_the_caller() {
 
     let results = bus.published_to(subject::ACTION_RESULTS);
     assert_eq!(results.len(), 1);
-    let published = results[0].decode::<ActionDisposition>().unwrap();
-    let outcome = executed(&published);
+    let published = results[0].decode::<ActionResult>().unwrap();
+    assert_eq!(published.action_id, action.id);
+    assert_eq!(published.incident_id, None);
+    let outcome = executed(&published.disposition);
     assert_eq!(outcome.status, ActionStatus::Failed);
     assert_eq!(outcome.action_id, action.id);
     assert_eq!(outcome.connector, "firewall");

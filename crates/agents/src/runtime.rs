@@ -1012,7 +1012,8 @@ impl AgentRuntime {
             let input = match dispatched {
                 Ok(disposition) => {
                     self.count(|stats| stats.actions_dispatched += 1);
-                    self.publish(subject::ACTION_RESULTS, &disposition).await;
+                    // The dispatcher is the single publisher of `aegis.actions.results`.
+                    // The runtime only gives the result back to the agent.
                     AgentInput::ActionResult(Box::new(disposition))
                 }
                 Err(error) => {

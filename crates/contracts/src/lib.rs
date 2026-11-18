@@ -40,7 +40,7 @@ pub mod source;
 
 pub use action::{
     ActionConnector, ActionDispatcher, ActionDisposition, ActionKind, ActionOutcome, ActionRequest,
-    ActionStatus,
+    ActionResult, ActionStatus,
 };
 pub use agent::{Agent, AgentContext, AgentInput, AgentOutput, AgentRole, AgentTask};
 pub use audit::{AuditEntry, AuditKind, AuditLog, AuditRecord, ChainVerification};

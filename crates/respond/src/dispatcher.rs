@@ -19,7 +19,7 @@ use std::time::Duration;
 
 use aegis_contracts::action::{
     ActionConnector, ActionDispatcher, ActionDisposition, ActionOutcome, ActionRequest,
-    ActionStatus,
+    ActionResult, ActionStatus,
 };
 use aegis_contracts::audit::{AuditEntry, AuditKind, AuditLog};
 use aegis_contracts::bus::{MessageBus, publish_json, subject};
@@ -85,8 +85,11 @@ impl DispatcherBuilder {
         self
     }
 
-    /// Sets the message bus. The dispatcher then publishes each result on
-    /// [`subject::ACTION_RESULTS`] and each new approval request on [`subject::APPROVALS`].
+    /// Sets the message bus. The dispatcher then publishes each result as an
+    /// [`ActionResult`] on [`subject::ACTION_RESULTS`], and each new approval request on
+    /// [`subject::APPROVALS`].
+    ///
+    /// The dispatcher is the single publisher of [`subject::ACTION_RESULTS`].
     #[must_use]
     pub fn bus(mut self, bus: Arc<dyn MessageBus>) -> Self {
         self.bus = Some(bus);
@@ -610,11 +613,19 @@ impl Dispatcher {
     }
 
     /// Publishes a result on the bus. A bus failure does not change the result.
+    ///
+    /// The message holds the identifier of the request, because a denial and a pending
+    /// approval do not hold it.
     async fn publish_result(&self, pass: &Pass, disposition: &ActionDisposition) {
-        if let Some(bus) = &self.bus
-            && let Err(error) =
-                publish_json(bus.as_ref(), subject::ACTION_RESULTS, disposition).await
-        {
+        let Some(bus) = &self.bus else {
+            return;
+        };
+        let result = ActionResult {
+            action_id: pass.request.id,
+            incident_id: pass.request.incident_id,
+            disposition: disposition.clone(),
+        };
+        if let Err(error) = publish_json(bus.as_ref(), subject::ACTION_RESULTS, &result).await {
             self.record_publish_failure(pass, subject::ACTION_RESULTS, &error)
                 .await;
         }

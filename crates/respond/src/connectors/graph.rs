@@ -48,7 +48,13 @@ pub mod parameter {
     ///
     /// [`ActionKind::RevokeCredential`](aegis_contracts::ActionKind::RevokeCredential) and
     /// [`ActionKind::RotateCredential`](aegis_contracts::ActionKind::RotateCredential) need it.
+    ///
+    /// The connector also reads this value from [`CREDENTIAL_ID`], if `key_id` is not set.
     pub const KEY_ID: &str = "key_id";
+    /// A second name for [`KEY_ID`]: the shared attribute name
+    /// [`attr::CREDENTIAL_ID`](aegis_contracts::event::attr::CREDENTIAL_ID). The Responder
+    /// agent copies the credential identifier of a detection to a request with this name.
+    pub const CREDENTIAL_ID: &str = aegis_contracts::event::attr::CREDENTIAL_ID;
     /// The display name of the new password credential. This parameter is optional.
     pub const DISPLAY_NAME: &str = "display_name";
 }
@@ -323,7 +329,11 @@ fn text_parameter(request: &ActionRequest, name: &str) -> Result<Option<String>>
 }
 
 fn key_id(request: &ActionRequest) -> Result<String> {
-    text_parameter(request, parameter::KEY_ID)?.ok_or_else(|| {
+    let key_id = match text_parameter(request, parameter::KEY_ID)? {
+        Some(key_id) => Some(key_id),
+        None => text_parameter(request, parameter::CREDENTIAL_ID)?,
+    };
+    key_id.ok_or_else(|| {
         Error::InvalidInput(format!(
             "the action {} needs the parameter {}",
             snake_name(&request.kind),

@@ -175,6 +175,13 @@ impl CredentialAfterGrant {
         {
             attributes.push((attr::CREDENTIAL_TYPE, json!(credential_type)));
         }
+        // A response action needs the identifier of the credential to remove it.
+        if let Some(credential_id) = event
+            .attribute_str(attr::CREDENTIAL_ID)
+            .filter(|_| is_credential)
+        {
+            attributes.push((attr::CREDENTIAL_ID, json!(credential_id)));
+        }
         Some(
             Finding {
                 rule_id: CREDENTIAL_AFTER_GRANT_RULE_ID,
@@ -337,6 +344,21 @@ mod tests {
         let detector = detector();
         assert_eq!(detector.evaluate(&credential(1, 0, APP)), None);
         assert_eq!(detector.evaluate(&grant(2, 5_000, APP)), None);
+    }
+
+    #[test]
+    fn the_detection_keeps_the_identifier_of_the_new_credential() {
+        let detector = detector();
+        assert_eq!(detector.evaluate(&grant(1, 0, APP)), None);
+        let event = credential(2, 3_000, APP).with_attribute(attr::CREDENTIAL_ID, "credential-1");
+        let found = detector.evaluate(&event).unwrap();
+        assert_eq!(found.attributes["credential_id"], json!("credential-1"));
+
+        // An event with no identifier gives a detection with no identifier.
+        let detector = self::detector();
+        assert_eq!(detector.evaluate(&grant(1, 0, APP)), None);
+        let found = detector.evaluate(&credential(2, 3_000, APP)).unwrap();
+        assert_eq!(found.attributes.get("credential_id"), None);
     }
 
     #[test]

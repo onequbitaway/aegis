@@ -127,7 +127,7 @@ with the number of indicators.
 | --- | --- | --- |
 | `SignInBurst` | Many failed sign-ins from one address in a short time. One detection for each burst, then a cooldown. A sign-in that succeeds from the address in the cooldown gives a second detection (`T1078`). | `T1110.003` |
 | `PrivilegedSelfAssignment` | A service principal or an application gives a privileged role or permission to itself. | `T1098.003` |
-| `CredentialAfterGrant` | A new application credential a short time after a consent or a permission grant for the same application. | `T1098.001` |
+| `CredentialAfterGrant` | A new application credential a short time after a consent or a permission grant for the same application. The detection keeps the attribute `credential_id` of the credential event, so that a response action can remove that credential. | `T1098.001` |
 | `ImpossibleSpeed` | One principal acts from two places at a speed that is not possible, or in two resource tenants from two places in seconds. | `T1078.004` |
 
 The detectors use the time of the events and not the clock of the host. Each detector

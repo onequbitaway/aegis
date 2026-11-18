@@ -287,6 +287,59 @@ async fn kill_session_revokes_the_sign_in_sessions_of_the_user() {
 }
 
 #[tokio::test]
+async fn revoke_credential_reads_the_key_from_the_credential_id_parameter_of_the_responder() {
+    let server = MockServer::start().await;
+    mount_token(&server).await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(204))
+        .mount(&server)
+        .await;
+    let connector = connector(&server);
+
+    // The Responder agent names the parameter with the shared attribute name.
+    let mut from_responder = request(ActionKind::RevokeCredential, rogue_principal());
+    from_responder
+        .parameters
+        .insert("credential_id".to_owned(), json!(OLD_KEY_ID));
+    let outcome = connector.execute(&from_responder).await.unwrap();
+    assert_eq!(outcome.status, ActionStatus::Succeeded);
+
+    // `key_id` has priority when a request has the two names.
+    let mut both = with_key(
+        request(ActionKind::RevokeCredential, rogue_principal()),
+        "key-2",
+    );
+    both.parameters
+        .insert("credential_id".to_owned(), json!(OLD_KEY_ID));
+    connector.execute(&both).await.unwrap();
+
+    assert_eq!(
+        graph_requests(&server).await,
+        [
+            seen(
+                "POST",
+                "/v1.0/servicePrincipals/sp-sync-helper/removePassword",
+                json!({ "keyId": OLD_KEY_ID })
+            ),
+            seen(
+                "POST",
+                "/v1.0/servicePrincipals/sp-sync-helper/removePassword",
+                json!({ "keyId": "key-2" })
+            ),
+        ]
+    );
+
+    // A request with none of the two names stays an error.
+    let neither = request(ActionKind::RevokeCredential, rogue_principal());
+    let error = connector.execute(&neither).await.unwrap_err();
+    assert!(
+        matches!(&error, Error::InvalidInput(message)
+            if message == "the action revoke_credential needs the parameter key_id"),
+        "{error:?}"
+    );
+}
+
+#[tokio::test]
 async fn revoke_credential_removes_the_password_with_the_key_id() {
     let server = MockServer::start().await;
     mount_token(&server).await;

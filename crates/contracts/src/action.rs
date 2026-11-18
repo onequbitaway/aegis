@@ -206,6 +206,21 @@ pub enum ActionDisposition {
     Denied(PolicyDecision),
 }
 
+/// The result of one action request, as the dispatcher publishes it on the bus.
+///
+/// A disposition does not always hold the identifier of its request. This type adds the
+/// identifier, so that a subscriber can link each result to its request.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ActionResult {
+    /// The identifier of the request.
+    pub action_id: ActionId,
+    /// The incident that the action responds to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub incident_id: Option<IncidentId>,
+    /// What the dispatcher did with the request.
+    pub disposition: ActionDisposition,
+}
+
 /// The single path from an action request to a change in the environment.
 ///
 /// An implementation evaluates policy, puts gated actions in the approval queue, calls the

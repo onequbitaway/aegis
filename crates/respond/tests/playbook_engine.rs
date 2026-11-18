@@ -8,7 +8,8 @@ use std::sync::Arc;
 
 use aegis_contracts::Error;
 use aegis_contracts::action::{
-    ActionConnector, ActionDisposition, ActionKind, ActionOutcome, ActionRequest, ActionStatus,
+    ActionConnector, ActionDisposition, ActionKind, ActionOutcome, ActionRequest, ActionResult,
+    ActionStatus,
 };
 use aegis_contracts::audit::{AuditKind, AuditLog};
 use aegis_contracts::bus::subject;
@@ -276,8 +277,11 @@ async fn the_rogue_principal_playbook_runs_in_dry_run_through_the_dispatcher() {
     let results = stack.bus.published_to(subject::ACTION_RESULTS);
     assert_eq!(results.len(), plan.len());
     for (message, line) in results.iter().zip(&run.steps) {
+        let result = message.decode::<ActionResult>().unwrap();
+        assert_eq!(Some(result.action_id), line.request_id, "{}", line.step);
+        assert_eq!(result.incident_id, Some(incident.id), "{}", line.step);
         assert_eq!(
-            StepResult::Dispatched(message.decode::<ActionDisposition>().unwrap()),
+            StepResult::Dispatched(result.disposition),
             line.result,
             "{}",
             line.step

@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use aegis_contracts::action::{
     ActionConnector, ActionDispatcher, ActionDisposition, ActionKind, ActionOutcome, ActionRequest,
-    ActionStatus,
+    ActionResult, ActionStatus,
 };
 use aegis_contracts::agent::{Agent, AgentInput, AgentOutput, AgentRole, AgentTask};
 use aegis_contracts::audit::{
@@ -520,6 +520,45 @@ fn action_types_round_trip() {
         pending["pending_approval"]["decision"]["effect"],
         "require_approval"
     );
+}
+
+#[test]
+fn action_result_round_trips_and_links_each_disposition_to_its_request() {
+    let request = sample_action();
+    let incident_id = IncidentId::new();
+
+    // A denial holds no action identifier of its own. The result adds it.
+    let denied = ActionResult {
+        action_id: request.id,
+        incident_id: Some(incident_id),
+        disposition: ActionDisposition::Denied(sample_decision(PolicyEffect::Deny)),
+    };
+    let value = round_trip(&denied);
+    assert_eq!(
+        sorted_keys(&value),
+        ["action_id", "disposition", "incident_id"]
+    );
+    assert_eq!(value["action_id"], request.id.to_string());
+    assert_eq!(value["incident_id"], incident_id.to_string());
+    assert_eq!(value["disposition"]["denied"]["effect"], "deny");
+
+    // A request with no incident has no `incident_id` key, and decodes without it.
+    let executed = ActionResult {
+        action_id: request.id,
+        incident_id: None,
+        disposition: ActionDisposition::Executed(sample_outcome(request.id)),
+    };
+    let value = round_trip(&executed);
+    assert_eq!(sorted_keys(&value), ["action_id", "disposition"]);
+    assert_eq!(value["disposition"]["executed"]["status"], "simulated");
+    let decoded: ActionResult = serde_json::from_value(value).unwrap();
+    assert_eq!(decoded.incident_id, None);
+    assert_eq!(decoded.action_id, request.id);
+
+    // The old payload of the subject, a bare disposition, is not a result.
+    let bare = serde_json::to_value(&executed.disposition).unwrap();
+    let error = serde_json::from_value::<ActionResult>(bare).unwrap_err();
+    assert_eq!(error.to_string(), "missing field `action_id`");
 }
 
 #[test]
