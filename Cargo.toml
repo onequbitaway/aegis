@@ -12,6 +12,7 @@ publish = false
 
 [workspace.dependencies]
 aegis-contracts = { path = "crates/contracts" }
+aegis-memory = { path = "crates/memory" }
 aegis-testkit = { path = "crates/testkit" }
 
 anyhow = "1.0.104"

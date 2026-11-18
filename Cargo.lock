@@ -19,10 +19,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "aegis-memory"
+version = "0.1.0"
+dependencies = [
+ "aegis-contracts",
+ "async-trait",
+ "chrono",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "aegis-testkit"
 version = "0.1.0"
 dependencies = [
  "aegis-contracts",
+ "aegis-memory",
  "async-trait",
  "chrono",
  "futures",

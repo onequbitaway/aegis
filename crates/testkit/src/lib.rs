@@ -4,6 +4,8 @@
 //! in the contract documentation, so a test that passes here also describes the real
 //! subsystem.
 //!
+//! The storage implementations come from the `aegis-memory` crate.
+//!
 //! | Item | Contract |
 //! | --- | --- |
 //! | [`MemoryBus`] | [`MessageBus`](aegis_contracts::MessageBus) |
@@ -32,15 +34,14 @@ pub mod fixtures;
 mod model;
 mod policy;
 mod source;
-mod store;
 
 pub use action::{DispatchMode, RecordingConnector, RecordingDispatcher};
+pub use aegis_memory::{MemoryApprovals, MemoryGraph, MemoryIncidents, MemoryVectors};
 pub use audit::MemoryAuditLog;
 pub use bus::MemoryBus;
 pub use model::{EMBEDDING_DIMENSIONS, ScriptedModel, embed_text};
-pub use policy::{MemoryApprovals, StaticPolicy};
+pub use policy::StaticPolicy;
 pub use source::StaticSource;
-pub use store::{MemoryGraph, MemoryIncidents, MemoryVectors};
 
 /// Locks a mutex. A panic in a different thread does not make the data unavailable.
 pub(crate) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {

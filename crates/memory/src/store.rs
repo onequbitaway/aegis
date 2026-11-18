@@ -207,7 +207,6 @@ mod tests {
     use chrono::{Duration, Utc};
 
     use super::*;
-    use crate::model::embed_text;
 
     fn entity_node(kind: EntityKind, id: &str, age_seconds: i64) -> GraphNode {
         let mut node = GraphNode::from_entity(&EntityRef::new(kind, id));
@@ -326,25 +325,38 @@ mod tests {
     #[tokio::test]
     async fn vector_search_returns_the_nearest_records_first() {
         let store = MemoryVectors::default();
-        for (id, text) in [
-            ("burst", "sign-in burst from one address"),
-            ("secret", "rotate the vault secret"),
-            ("role", "application assigned a privileged role"),
+        for (id, embedding) in [
+            ("east", vec![1.0, 0.0, 0.0]),
+            ("north", vec![0.0, 1.0, 0.0]),
+            ("north_east", vec![1.0, 1.0, 0.0]),
         ] {
             let record = VectorRecord {
                 id: id.to_owned(),
-                embedding: embed_text(text),
-                text: text.to_owned(),
+                embedding,
+                text: id.to_owned(),
                 metadata: serde_json::Value::Null,
             };
             store.upsert("notes", record).await.unwrap();
         }
-        let query = embed_text("burst of sign-in attempts from an address");
-        let matches = store.search("notes", &query, 2).await.unwrap();
-        assert_eq!(matches.len(), 2);
-        assert_eq!(matches[0].record.id, "burst");
+        let matches = store.search("notes", &[2.0, 0.1, 0.0], 2).await.unwrap();
+        let ids: Vec<&str> = matches
+            .iter()
+            .map(|found| found.record.id.as_str())
+            .collect();
+        assert_eq!(ids, ["east", "north_east"]);
         assert!(matches[0].score > matches[1].score);
-        assert!(store.search("absent", &query, 2).await.unwrap().is_empty());
+        assert!(
+            (matches[0].score - 0.998_752).abs() < 1e-4,
+            "{}",
+            matches[0].score
+        );
+        assert!(
+            store
+                .search("absent", &[1.0, 0.0, 0.0], 2)
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[tokio::test]

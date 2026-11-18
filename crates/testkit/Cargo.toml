@@ -9,6 +9,7 @@ publish.workspace = true
 
 [dependencies]
 aegis-contracts.workspace = true
+aegis-memory.workspace = true
 async-trait.workspace = true
 chrono.workspace = true
 futures.workspace = true
