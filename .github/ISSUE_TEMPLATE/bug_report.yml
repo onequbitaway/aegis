@@ -1,0 +1,42 @@
+name: Bug report
+description: Report a defect in AEGIS.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: Do not report a vulnerability here. Follow the security policy.
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: Tell us what occurred and what you expected.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: Give the commands, the configuration, and the input data.
+      placeholder: |
+        1. Run `...`
+        2. See the error
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Commit or version
+      description: Give the output of `git rev-parse HEAD` or the release version.
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: Give the operating system and the output of `rustc --version`.
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Remove all secrets and personal data before you paste logs.
+      render: text
