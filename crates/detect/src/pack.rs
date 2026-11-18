@@ -574,6 +574,10 @@ mod tests {
             tags: Vec::new(),
             verdict: None,
             id: None,
+            first_seen: None,
+            last_seen: None,
+            source: None,
+            suppress_seconds: None,
         };
         let pack = RulePack::new(manifest.clone(), vec![rule("a")], vec![indicator]).unwrap();
         assert_eq!(pack.manifest().name, "from-parts");

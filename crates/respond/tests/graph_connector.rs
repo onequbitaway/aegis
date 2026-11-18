@@ -991,6 +991,8 @@ async fn the_connector_reports_its_identity_and_its_actions() {
             ActionKind::KillSession,
             ActionKind::RevokeCredential,
             ActionKind::RotateCredential,
+            // The friction action. `tests/friction.rs` has its tests.
+            ActionKind::Custom("restrict_user_consent".to_owned()),
         ]
     );
 }

@@ -773,6 +773,55 @@ async fn each_entity_gives_one_request_for_each_target_in_incident_order() {
 }
 
 #[tokio::test]
+async fn a_step_with_revert_after_gives_each_request_the_timed_revert_parameter() {
+    let yaml = THREE_STEPS.replace(
+        "    action: block_ip\n",
+        "    action: block_ip\n    revert_after: 90m\n",
+    );
+    let playbook = playbook(&yaml);
+    assert_eq!(
+        playbook
+            .steps()
+            .iter()
+            .map(|step| step.revert_after().map(|time| time.as_secs()))
+            .collect::<Vec<_>>(),
+        [Some(5_400), None, None]
+    );
+    let stack = Stack::new(StaticPolicy::AllowAll, false);
+    let incident = incident_with(
+        Severity::High,
+        &["T1110.003"],
+        vec![
+            EntityRef::new(EntityKind::IpAddress, "203.0.113.50"),
+            EntityRef::new(EntityKind::IpAddress, "203.0.113.51"),
+        ],
+    );
+
+    let run = engine(&stack)
+        .run(&playbook, &incident, RunMode::DryRun)
+        .await
+        .unwrap();
+
+    assert_eq!(run.failures(), 0, "{:?}", run.steps);
+    // Each request of the step has the parameter. A step with no `revert_after` has none.
+    let blocks = stack.firewall.executed();
+    assert_eq!(blocks.len(), 2);
+    for block in &blocks {
+        assert_eq!(
+            block.parameters.get("revert_after_seconds"),
+            Some(&json!(5_400)),
+            "{}",
+            block.target.id
+        );
+    }
+    let others = stack.chat.executed();
+    assert!(!others.is_empty());
+    for other in &others {
+        assert_eq!(other.parameters.get("revert_after_seconds"), None);
+    }
+}
+
+#[tokio::test]
 async fn matching_selects_the_playbooks_whose_trigger_is_true() {
     let stack = Stack::new(StaticPolicy::AllowAll, false);
     let mut engine = engine(&stack);

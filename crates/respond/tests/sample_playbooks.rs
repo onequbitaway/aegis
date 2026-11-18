@@ -5,24 +5,32 @@ mod common;
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use aegis_contracts::action::{ActionDisposition, ActionKind, ActionStatus};
-use aegis_contracts::audit::AuditLog;
+use aegis_contracts::audit::{AuditKind, AuditLog};
 use aegis_contracts::common::{DetectionId, EntityKind, EntityRef, IncidentId, Severity};
 use aegis_contracts::detection::{AttackTechnique, Detection, DetectionTier, Detector, Verdict};
 use aegis_contracts::event::{action, attr};
 use aegis_contracts::incident::{Incident, IncidentStatus};
 use aegis_respond::deception::MemoryHoneytokenStore;
 use aegis_respond::playbook::TargetSelector;
+use aegis_respond::revert::{REVERT_AFTER_PARAMETER, kind_has_inverse};
 use aegis_respond::{
-    ActionRegistry, Dispatcher, HoneytokenKind, HoneytokenRegistry, HoneytokenRequest,
-    HoneytokenTripDetector, Playbook, PlaybookEngine, RunMode, StepResult,
+    ActionRegistry, Dispatcher, GraphActionConnector, GraphConfig, HoneytokenKind,
+    HoneytokenRegistry, HoneytokenRequest, HoneytokenTripDetector, MemoryRevertStore,
+    MemorySecretSink, Playbook, PlaybookEngine, RevertScheduler, RunMode, StepResult, friction,
 };
 use aegis_testkit::fixtures::{self, HONEYTOKEN_ID, TENANT, WORKLOAD_IP};
 use aegis_testkit::{MemoryApprovals, MemoryAuditLog, RecordingConnector, StaticPolicy};
+use secrecy::SecretString;
 use serde_json::{Value, json};
 
 use common::{rogue_incident, sample_playbook_dir};
+
+const FRICTION_PLAYBOOK: &str = "raise-friction-critical-identity-incident";
+/// The example tenant in the trigger of the friction playbook.
+const FRICTION_TENANT: &str = "tenant.example.com";
 
 /// A dispatcher that permits each action, with one connector that records each request.
 struct Rig {
@@ -361,14 +369,19 @@ async fn the_rogue_principal_playbook_tells_the_team_when_the_containment_fails(
     let mut registry = ActionRegistry::new();
     registry.register(identity.clone()).unwrap();
     registry.register(bridge.clone()).unwrap();
-    let dispatcher = Dispatcher::builder(
-        Arc::new(registry),
-        Arc::new(StaticPolicy::AllowAll),
-        Arc::new(MemoryApprovals::default()),
-        Arc::new(MemoryAuditLog::default()),
-    )
-    .build();
-    let mut engine = PlaybookEngine::new(Arc::new(dispatcher));
+    // The playbook has steps with a timed revert, so the dispatcher needs a revert store.
+    let dispatcher = Arc::new(
+        Dispatcher::builder(
+            Arc::new(registry),
+            Arc::new(StaticPolicy::AllowAll),
+            Arc::new(MemoryApprovals::default()),
+            Arc::new(MemoryAuditLog::default()),
+        )
+        .revert_store(Arc::new(MemoryRevertStore::default()))
+        .build(),
+    );
+    let scheduler = RevertScheduler::new(dispatcher.clone()).unwrap();
+    let mut engine = PlaybookEngine::new(dispatcher);
     let report = engine.load_dir(sample_playbook_dir()).await.unwrap();
     assert!(report.rejected.is_empty(), "{:?}", report.rejected);
     let playbook = engine
@@ -384,7 +397,21 @@ async fn the_rogue_principal_playbook_tells_the_team_when_the_containment_fails(
     // The three identity actions failed. The run did not stop.
     assert!(run.completed(), "stopped at {:?}", run.stopped_at);
     assert_eq!(run.failures(), 3);
-    assert_eq!(identity.executed().len(), 3);
+    // Each identity step made one call. The step with a timed revert failed in the check
+    // before the change, which is a dry run.
+    let identity_calls: Vec<(ActionKind, bool)> = identity
+        .executed()
+        .iter()
+        .map(|call| (call.kind.clone(), call.dry_run))
+        .collect();
+    assert_eq!(
+        identity_calls,
+        [
+            (ActionKind::DisableServicePrincipal, true),
+            (ActionKind::RevokeCredential, false),
+            (ActionKind::KillSession, false),
+        ]
+    );
     for line in &run.steps[..3] {
         assert!(
             matches!(
@@ -396,17 +423,237 @@ async fn the_rogue_principal_playbook_tells_the_team_when_the_containment_fails(
             line.result
         );
     }
-    // The firewall block, the notification, and the ticket were still sent.
+    // The firewall block, the notification, and the ticket were still sent. The block has
+    // a timed revert: the dispatcher first asks for a dry run, to learn that the connector
+    // can undo the block, and then sends the block.
     assert_eq!(
         bridge
             .executed()
             .iter()
-            .map(|call| call.kind.clone())
+            .map(|call| (call.kind.clone(), call.dry_run))
             .collect::<Vec<_>>(),
         [
-            ActionKind::BlockIp,
-            ActionKind::Notify,
-            ActionKind::OpenTicket
+            (ActionKind::BlockIp, true),
+            (ActionKind::BlockIp, false),
+            (ActionKind::Notify, false),
+            (ActionKind::OpenTicket, false),
         ]
     );
+    // The block that ran has a pending revert of 4 hours. A step that failed has none.
+    let pending = scheduler.pending().await.unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].kind, ActionKind::BlockIp);
+    assert_eq!(pending[0].revert_after_seconds, 14_400);
+    assert_eq!(
+        pending[0].requested_by,
+        "playbook:contain-rogue-service-principal"
+    );
+}
+
+#[tokio::test]
+async fn the_reversible_containment_steps_of_the_samples_have_a_timed_revert() {
+    let rig = rig(Vec::new()).await;
+    let playbooks = rig.engine.playbooks();
+    assert_eq!(playbooks.len(), 6);
+
+    // Each step for one of these actions has a wrong-containment cost and an inverse.
+    let contain_first = [
+        ActionKind::DisableUser,
+        ActionKind::DisableServicePrincipal,
+        ActionKind::BlockIp,
+        ActionKind::IsolateHost,
+        friction::restrict_user_consent(),
+    ];
+    let mut with_revert = Vec::new();
+    for playbook in playbooks {
+        for step in playbook.steps() {
+            let name = format!("{}/{}", playbook.name(), step.id());
+            if contain_first.contains(step.action()) {
+                assert!(step.revert_after().is_some(), "{name}");
+            } else {
+                assert_eq!(step.revert_after(), None, "{name}");
+            }
+            if let Some(revert_after) = step.revert_after() {
+                assert!(kind_has_inverse(step.action()), "{name}");
+                with_revert.push((name, revert_after));
+            }
+        }
+    }
+    let hours = |count: u64| Duration::from_secs(count * 3_600);
+    assert_eq!(
+        with_revert,
+        [
+            (
+                "block-password-spray-source/block-source-address".to_owned(),
+                hours(4)
+            ),
+            ("contain-compromised-user/disable-user".to_owned(), hours(4)),
+            (
+                "contain-rogue-service-principal/disable-service-principal".to_owned(),
+                hours(4)
+            ),
+            (
+                "contain-rogue-service-principal/block-source-address".to_owned(),
+                hours(4)
+            ),
+            ("isolate-compromised-host/isolate-host".to_owned(), hours(4)),
+            (
+                "raise-friction-critical-identity-incident/restrict-user-consent".to_owned(),
+                hours(2)
+            ),
+            (
+                "respond-to-honeytoken-trip/block-source-address".to_owned(),
+                hours(4)
+            ),
+        ]
+    );
+}
+
+/// Returns a critical identity incident in the tenant of the friction playbook.
+fn friction_incident() -> Incident {
+    let mut incident = rogue_incident();
+    incident.tenant = Some(FRICTION_TENANT.to_owned());
+    incident
+}
+
+#[tokio::test]
+async fn the_friction_playbook_runs_only_for_a_critical_incident_in_a_permitted_tenant() {
+    let rig = rig(Vec::new()).await;
+    let matched = |incident: &Incident| {
+        rig.engine
+            .matching(incident)
+            .iter()
+            .any(|playbook| playbook.name() == FRICTION_PLAYBOOK)
+    };
+
+    assert!(matched(&friction_incident()));
+    // The recorded attack is in a tenant that the sample does not name. A change for all
+    // users of a tenant needs the tenant in the trigger.
+    assert!(!matched(&rogue_incident()));
+    let mut high = friction_incident();
+    high.severity = Severity::High;
+    assert!(!matched(&high));
+    let mut no_tenant = friction_incident();
+    no_tenant.tenant = None;
+    assert!(!matched(&no_tenant));
+    let mut other_technique = friction_incident();
+    other_technique.attack = vec![AttackTechnique::new(
+        "credential-access",
+        "T1110.003",
+        "Password Spraying",
+    )];
+    assert!(!matched(&other_technique));
+}
+
+#[tokio::test]
+async fn the_friction_playbook_runs_in_dry_run_through_the_real_dispatcher() {
+    // The real Microsoft Graph connector. A dry run sends no request, so the test needs
+    // no server. The loopback address has no listener.
+    let mut config = GraphConfig::new(
+        FRICTION_TENANT,
+        "client-aegis",
+        SecretString::from("client-secret"),
+    );
+    config.graph_base_url = "http://127.0.0.1:9/v1.0".to_owned();
+    config.login_base_url = "http://127.0.0.1:9".to_owned();
+    let graph = GraphActionConnector::new(config, Arc::new(MemorySecretSink::default())).unwrap();
+    let chat = Arc::new(RecordingConnector::new("chat", vec![ActionKind::Notify]));
+    let mut registry = ActionRegistry::new();
+    registry.register(Arc::new(graph)).unwrap();
+    registry.register(chat.clone()).unwrap();
+    let audit = Arc::new(MemoryAuditLog::default());
+    let dispatcher = Arc::new(
+        Dispatcher::builder(
+            Arc::new(registry),
+            Arc::new(StaticPolicy::AllowAll),
+            Arc::new(MemoryApprovals::default()),
+            audit.clone(),
+        )
+        .revert_store(Arc::new(MemoryRevertStore::default()))
+        .build(),
+    );
+    let scheduler = RevertScheduler::new(dispatcher.clone()).unwrap();
+    let mut engine = PlaybookEngine::new(dispatcher);
+    let report = engine.load_dir(sample_playbook_dir()).await.unwrap();
+    assert!(report.rejected.is_empty(), "{:?}", report.rejected);
+    let incident = friction_incident();
+    let playbook = engine.playbook(FRICTION_PLAYBOOK).unwrap().clone();
+    assert!(playbook.matches(&incident));
+
+    let run = engine
+        .run(&playbook, &incident, RunMode::DryRun)
+        .await
+        .unwrap();
+
+    assert_eq!(run.playbook, FRICTION_PLAYBOOK);
+    assert!(run.completed());
+    assert_eq!(run.failures(), 0, "{:?}", run.steps);
+    assert_eq!(run.steps.len(), 2);
+
+    // Step 1: the friction action on the tenant, through the Graph connector.
+    let restrict = &run.steps[0];
+    assert_eq!(restrict.step, "restrict-user-consent");
+    assert_eq!(restrict.action, friction::restrict_user_consent());
+    assert_eq!(
+        restrict.target,
+        Some(EntityRef::new(EntityKind::Tenant, FRICTION_TENANT))
+    );
+    let StepResult::Dispatched(ActionDisposition::Executed(outcome)) = &restrict.result else {
+        panic!("expected a simulated action, found {:?}", restrict.result);
+    };
+    assert_eq!(outcome.status, ActionStatus::Simulated);
+    assert_eq!(outcome.connector, "entra-graph");
+    assert!(outcome.reversible);
+    assert_eq!(
+        outcome.message,
+        "Would stop user consent to applications in tenant tenant.example.com. This was a dry run. Nothing changed."
+    );
+
+    // Step 2: the notification.
+    let notify = &run.steps[1];
+    assert_eq!(notify.step, "notify-security-team");
+    let calls = chat.executed();
+    assert_eq!(calls.len(), 1);
+    assert!(calls[0].dry_run);
+    assert_eq!(calls[0].target.id, "security-operations");
+    assert!(
+        calls[0].reason.contains(
+            "stops user consent to applications in the tenant tenant.example.com for 2 hours"
+        ),
+        "{}",
+        calls[0].reason
+    );
+    assert_eq!(Some(calls[0].id), notify.request_id);
+
+    // The request of the friction step has the timed revert of 2 hours. A dry run
+    // schedules nothing.
+    let records = audit.records();
+    let of_step: Vec<_> = records
+        .iter()
+        .filter(|record| {
+            record.payload["action_id"] == json!(restrict.request_id)
+                || record.payload["action"]["id"] == json!(restrict.request_id)
+        })
+        .collect();
+    assert_eq!(
+        of_step.iter().map(|record| record.kind).collect::<Vec<_>>(),
+        [
+            AuditKind::ActionProposed,
+            AuditKind::PolicyDecision,
+            AuditKind::ActionExecuted
+        ]
+    );
+    assert_eq!(
+        of_step[0].payload["action"]["parameters"],
+        json!({ REVERT_AFTER_PARAMETER: 7_200 })
+    );
+    assert_eq!(
+        of_step[0].payload["action"]["kind"],
+        json!({ "custom": "restrict_user_consent" })
+    );
+    assert_eq!(of_step[0].payload["action"]["dry_run"], true);
+    assert_eq!(of_step[2].payload["timed_revert"]["state"], "not_scheduled");
+    assert_eq!(of_step[2].payload["timed_revert"]["after_seconds"], 7_200);
+    assert_eq!(scheduler.pending().await.unwrap(), []);
+    assert!(audit.verify().await.unwrap().valid);
 }

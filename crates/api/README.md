@@ -37,6 +37,8 @@ in-memory services of `aegis-testkit`. The composition root fills it with the re
 | `ApiState::new(parts)` | Makes the state. Secrets come from the environment of the process. |
 | `ApiState::with_env(lookup)` | Sets the function that reads an environment variable. Use it in a test. |
 | `ApprovalActions`, `ApprovalDecision` | The path for approval decisions. The composition root implements the trait. |
+| `RevertActions`, `ApiState::with_reverts(path)` | The path for timed reverts and for the revert of an action. The composition root implements the trait. |
+| `StatusSource`, `SystemStatus`, `FloodStatus`, `ApiState::with_status(source)` | The data of the composition root for the status route: the flood counters and more fields. |
 | `ApiConfig`, `PrincipalConfig`, `LimitsConfig` | The configuration. `ApiConfig::validate()` checks it. |
 | `ChatOpsConfig`, `SlackConfig`, `TeamsConfig`, `NotificationConfig` | The ChatOps configuration. |
 | `router(state, &config)` | Builds the `axum::Router`. Returns `Result`, because it reads the secrets. |
@@ -74,6 +76,17 @@ The implementation checks the approval rules, writes the audit record, records t
 decision, and, for an approval, runs the action. `ApprovalDecision` holds the changed
 `ApprovalRequest` and, for an approval, the `ActionDisposition` of the action. The REST
 API, the gRPC API, and the ChatOps endpoints all use this one path.
+
+### The revert path
+
+The API never changes a pending revert itself. It calls the trait `RevertActions`:
+`enabled`, `pending`, `confirm`, `extend`, `cancel`, and `revert`. The implementation
+checks the permission again, writes each audit record with the principal, and sends each
+revert through the dispatcher: the policy, the approval queue, and the audit log.
+
+A state with no revert path has no timed revert. `GET /reverts` then answers with
+`"enabled": false` and an empty list, and each other revert route answers with the status
+501.
 
 ## Use the crate
 
@@ -291,7 +304,7 @@ of the listed permissions is sufficient.
 | --- | --- | --- |
 | `GET /healthz` | None | `{"status":"ok"}` |
 | `GET /session` | A valid token | `{"principal", "permissions"}` |
-| `GET /status` | `view_incidents` | `{"version", "modules", "agents", "audit": {"head"}}` |
+| `GET /status` | `view_incidents` | `{"version", "modules", "agents", "audit": {"head"}, "flood"}`, and the fields of the composition root |
 | `GET /incidents?status=&limit=` | `view_incidents` | `{"items": [Incident]}`, newest first |
 | `GET /incidents/{id}` | `view_incidents` | `Incident` |
 | `GET /incidents/{id}/explanation` | `view_audit` | `{"subject", "records"}` from `aegis_policy::explain_incident` |
@@ -299,6 +312,11 @@ of the listed permissions is sufficient.
 | `GET /approvals?limit=` | `view_incidents` or `approve_actions` | `{"items": [ApprovalRequest], "total"}`, pending only, oldest first |
 | `GET /approvals/{id}` | `view_incidents` or `approve_actions` | `ApprovalRequest` |
 | `POST /approvals/{id}/decision` | `approve_actions` | `{"request", "disposition"}` |
+| `GET /reverts?limit=` | `view_incidents` or `approve_actions` | `{"enabled", "items": [PendingRevert], "total"}`, earliest revert time first |
+| `POST /reverts/{action_id}/confirm` | `approve_actions` | `{"revert": PendingRevert}`. The containment stays. |
+| `POST /reverts/{action_id}/extend` | `approve_actions` | `{"revert": PendingRevert}` with the new revert time |
+| `POST /reverts/{action_id}/cancel` | `approve_actions` | `{"disposition"}`. The revert runs now, through the policy. |
+| `POST /actions/{id}/revert` | `approve_actions` | `{"disposition"}`. The revert of one action, with or without a revert time. |
 | `GET /graph/nodes?kind=&limit=` | `view_incidents` | `{"items": [GraphNode]}`. `kind` is mandatory. |
 | `GET /graph/nodes/{id}` | `view_incidents` | `GraphNode` |
 | `GET /graph/nodes/{id}/neighbors?direction=&relation=&limit=` | `view_incidents` | `{"node", "items", "total"}`. The default direction is `both`. |
@@ -315,6 +333,9 @@ Request bodies:
 | Route | Body |
 | --- | --- |
 | `POST /approvals/{id}/decision` | `{"approve": true, "note": "optional text"}`. The note has 1000 characters or fewer. |
+| `POST /reverts/{action_id}/confirm`, `POST /reverts/{action_id}/cancel` | `{}` |
+| `POST /reverts/{action_id}/extend` | `{"seconds": 3600}`. The value is 1 or more. |
+| `POST /actions/{id}/revert` | `{"reason": "text"}`. The reason has 1 to 1000 characters. |
 | `POST /goal` | `{"text": "Keep this tenant safe."}`. The text has 4000 characters or fewer. |
 | `POST /playbooks/{name}/runs` | `{"incident_id": "<uuid>", "mode": "dry_run"}`. `mode` is `dry_run` (default) or `live`. |
 
@@ -334,6 +355,17 @@ Notes:
 - `disposition` is `null` for a rejection.
 - `GET /status` finds the last audit record with a small number of one-record reads. The
   `AuditLog` contract has no function for the last record.
+- `GET /status` has the field `flood` only if the state has a `StatusSource`. The field
+  holds `suppressed_matches`, `repeat_detections`, `triage_quota_denials`, and
+  `coalesced_incident_updates`. The source can add more fields, for example `reverts`,
+  `evidence`, and `decoy`. It cannot replace a field of the route.
+- A revert route writes no audit record itself. The revert path writes each record with
+  the principal before the change. If the audit log does not take the record, nothing
+  changes.
+- A revert is a request of its own. With a policy that requires approval, the answer of
+  `cancel` or `revert` is a disposition with `pending_approval`. The action is not
+  reverted until a second person approves.
+- An action with no pending revert is a 404 for `confirm`, `extend`, and `cancel`.
 
 ## Errors
 
@@ -395,7 +427,7 @@ makes no request to a different origin, so it works on a network with no interne
 | --- | --- |
 | Incidents | The list with a state filter. The detail: the timeline, the entities, the ATT&CK techniques, the detections, and the audit records of the actions. |
 | Activity | The agent runtime (state, counts, roster, last tasks) and the live feed. |
-| Approvals | The pending requests. Approve or reject with a note. |
+| Approvals | The pending requests. Approve or reject with a note. The pending timed reverts, with the buttons **Confirm the action** and **Revert now**. |
 | Graph | Start at an incident, an entity, or a node identifier. Walk the neighbors in a list or in an SVG drawing. |
 | Audit | The records, newest first, and the state of the hash chain. |
 
@@ -520,6 +552,7 @@ Teams, or Docker.
 | --- | --- |
 | `tests/api/access.rs` | 401 and 403 for each route of `route_permissions()`, and the session route. |
 | `tests/api/incidents.rs`, `approvals.rs`, `graph.rs`, `system.rs` | Each route: the JSON form, 404, and 400. |
+| `tests/api/reverts.rs` | The revert routes with the real scheduler and a paused clock: the list, confirm, extend, cancel, the revert of one action, 401, 403, and a state with no revert path. |
 | `tests/api/stream.rs` | The live feed. |
 | `tests/api/limits.rs` | The body limit, the time limit, and no CORS. |
 | `tests/api/console.rs` | The page, the files, the policy, and no reference to a different origin. |

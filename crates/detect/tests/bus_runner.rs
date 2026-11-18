@@ -146,15 +146,17 @@ async fn the_runner_publishes_the_detections_and_the_incident_of_the_attack_log(
         RunSummary {
             events: 649,
             rejected_messages: 0,
-            detections: 9,
+            // Nine detections of the attack log and one of the marker event.
+            detections: 10,
             incidents: 8,
             stream_errors: 0,
+            coalesced_incident_updates: 0,
         }
     );
 
     // Each detection is on the subject of its tier, in the order of the events.
     let tier_one = detections_on(&memory, "aegis.detections.deterministic");
-    assert_eq!(tier_one.len(), 9);
+    assert_eq!(tier_one.len(), 10);
     assert!(
         tier_one
             .iter()
@@ -162,8 +164,8 @@ async fn the_runner_publishes_the_detections_and_the_incident_of_the_attack_log(
     );
     assert!(tier_one.is_sorted_by_key(|detection| detection.time));
     assert_eq!(tier_one[0].rule_id, "aegis.velocity.sign_in_burst");
-    assert_eq!(tier_one[8].rule_id, HONEYTOKEN_RULE_ID);
-    assert_eq!(memory.published_to("aegis.detections.>").len(), 9);
+    assert_eq!(tier_one[9].rule_id, HONEYTOKEN_RULE_ID);
+    assert_eq!(memory.published_to("aegis.detections.>").len(), 10);
 
     // The last state of the attack incident is the incident that the engine keeps.
     let states: Vec<Incident> = memory
@@ -175,7 +177,7 @@ async fn the_runner_publishes_the_detections_and_the_incident_of_the_attack_log(
     let attack = &states[6];
     assert!(!is_marker(attack));
     assert_eq!(attack.severity, Severity::Critical);
-    assert_eq!(attack.detections.len(), 8);
+    assert_eq!(attack.detections.len(), 9);
     assert_eq!(attack.tenant.as_deref(), Some(fixtures::TENANT));
     assert!(states[..6].iter().all(|state| state.id == attack.id));
     assert!(is_marker(&states[7]));
@@ -217,6 +219,7 @@ async fn a_message_that_is_not_an_event_is_dropped_and_counted() {
             detections: 1,
             incidents: 1,
             stream_errors: 0,
+            coalesced_incident_updates: 0,
         }
     );
 }

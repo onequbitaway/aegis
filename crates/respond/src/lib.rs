@@ -10,7 +10,9 @@
 //! | Module | Contents |
 //! | --- | --- |
 //! | [`registry`] | [`ActionRegistry`]: the named connectors and the routing table. |
-//! | [`dispatcher`] | [`Dispatcher`]: policy, approval, execution, and audit for each request. |
+//! | [`dispatcher`] | [`Dispatcher`]: policy, approval, execution, revert, and audit for each request. |
+//! | [`revert`] | [`RevertScheduler`] and [`RevertStore`]: contain first, with a timed revert. |
+//! | [`friction`] | The friction actions: reversible changes that slow an attacker. |
 //! | [`connectors`] | [`GraphActionConnector`] for Microsoft Entra ID and [`WebhookConnector`]. |
 //! | [`playbook`] | [`PlaybookEngine`], the YAML playbook format, and [`draft_response`]. |
 //! | [`deception`] | [`HoneytokenRegistry`], [`HoneytokenTripDetector`], and [`HoneytokenConnector`]. |
@@ -64,9 +66,11 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 pub mod connectors;
 pub mod deception;
 pub mod dispatcher;
+pub mod friction;
 mod names;
 pub mod playbook;
 pub mod registry;
+pub mod revert;
 
 pub use connectors::{
     GraphActionConnector, GraphConfig, MemorySecretSink, RotatedSecret, SecretSink, WebhookConfig,
@@ -82,6 +86,10 @@ pub use playbook::{
     StepResult, StepRun, draft_response,
 };
 pub use registry::{ActionRegistry, Route};
+pub use revert::{
+    FileRevertStore, MemoryRevertStore, PendingRevert, PendingState, RevertAttempt, RevertClock,
+    RevertProgress, RevertScheduler, RevertSchedulerConfig, RevertStats, RevertStore,
+};
 
 /// Compiles and runs the examples of the crate `README.md` as documentation tests.
 #[cfg(doctest)]

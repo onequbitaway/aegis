@@ -1,0 +1,30 @@
+title: Client contacted a decoy
+id: a7b8c02c-60bc-47ca-b31c-049f9d348159
+status: test
+description: >-
+  A client connected to a decoy service or sent a request to it. No approved client uses
+  a decoy. Scanners are frequent, so one contact is not proof of an attack.
+author: AEGIS project
+references:
+  - https://attack.mitre.org/techniques/T1595/
+detection:
+  selection:
+    action: decoy.contact
+  condition: selection
+falsepositives:
+  - An internet scanner.
+  - A vulnerability scan that the operator approved.
+level: low
+tags:
+  - attack.reconnaissance
+  - attack.t1595
+# One client gives one detection in ten minutes. The tenth contact in that time gives one
+# more detection, which is malicious: a scanner does not stay at a decoy.
+aegis.suppress:
+  window_seconds: 600
+  fields:
+    - actor.ip
+    - client_fingerprint
+  repeat:
+    count: 10
+    level: high

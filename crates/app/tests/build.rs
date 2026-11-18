@@ -48,11 +48,12 @@ async fn the_starter_configuration_builds_each_subsystem() {
             "contain-compromised-user",
             "contain-rogue-service-principal",
             "isolate-compromised-host",
+            "raise-friction-critical-identity-incident",
             "respond-to-honeytoken-trip"
         ]
     );
     assert_eq!(app.engine().pack().manifest().name, "aegis-identity");
-    assert_eq!(app.engine().pack().rules().len(), 9);
+    assert_eq!(app.engine().pack().rules().len(), 11);
     let agents = app.agents().unwrap();
     assert_eq!(agents.roster().roles().count(), 7);
     assert!(agents.config().dry_run);
@@ -302,9 +303,9 @@ async fn a_module_set_with_no_agent_gives_no_agent_runtime_and_keeps_the_inciden
 
     // The bridge writes the incident to the store with no agent.
     assert_eq!(report.agents, None);
-    assert_eq!(report.detections.len(), 8);
+    assert_eq!(report.detections.len(), 9);
     assert_eq!(report.incidents.len(), 1);
-    assert_eq!(report.incidents[0].detections.len(), 8);
+    assert_eq!(report.incidents[0].detections.len(), 9);
     assert_eq!(report.actions, []);
     assert_eq!(report.playbook_runs, []);
     assert_eq!(
@@ -346,7 +347,7 @@ async fn reload_takes_new_files_and_writes_a_configuration_change_record() {
     let starter = Starter::new();
     let app = starter.app().await;
     let digest_before = app.policy().version().digest;
-    assert_eq!(app.engine().pack().rules().len(), 9);
+    assert_eq!(app.engine().pack().rules().len(), 11);
 
     // The operator adds a rule, changes the policy, and adds a playbook.
     let rules = starter.path().join("detections/aegis-identity/rules");
@@ -381,11 +382,11 @@ async fn reload_takes_new_files_and_writes_a_configuration_change_record() {
     let report = app.reload().await.unwrap();
 
     assert_eq!(report.pack, "aegis-identity");
-    assert_eq!(report.rules, 10);
+    assert_eq!(report.rules, 12);
     assert_ne!(report.policy_digest, digest_before);
-    assert_eq!(report.playbooks.len(), 6);
+    assert_eq!(report.playbooks.len(), 7);
     assert_eq!(report.playbooks[0], "a-new-playbook");
-    assert_eq!(app.engine().pack().rules().len(), 10);
+    assert_eq!(app.engine().pack().rules().len(), 12);
     assert_eq!(app.policy().version().digest, report.policy_digest);
     assert_eq!(app.playbooks().names(), report.playbooks);
 
@@ -394,7 +395,7 @@ async fn reload_takes_new_files_and_writes_a_configuration_change_record() {
     assert_eq!(records[0].kind, AuditKind::ConfigChange);
     assert_eq!(records[0].actor, APP_ACTOR);
     assert_eq!(records[0].payload["policy"]["digest"], report.policy_digest);
-    assert_eq!(records[0].payload["rule_pack"]["rules"], 10);
+    assert_eq!(records[0].payload["rule_pack"]["rules"], 12);
     assert_eq!(records[0].payload["playbooks"][0], "a-new-playbook");
 
     // The new policy is in use: a dry run is permitted as before, and the new playbook
@@ -480,7 +481,7 @@ async fn a_reload_with_a_broken_file_keeps_the_old_state_and_returns_the_error()
             config_message(&error).starts_with(&format!("the section `{section}` is not valid:")),
             "{section}: {error:?}"
         );
-        assert_eq!(app.engine().pack().rules().len(), 9, "{section}");
+        assert_eq!(app.engine().pack().rules().len(), 11, "{section}");
         assert_eq!(app.policy().version().digest, digest, "{section}");
         assert_eq!(app.playbooks().names(), playbooks, "{section}");
         assert_eq!(app.audit().read(1, 10).await.unwrap(), [], "{section}");
@@ -491,7 +492,7 @@ async fn a_reload_with_a_broken_file_keeps_the_old_state_and_returns_the_error()
 
     // With the files correct again, the reload succeeds.
     let report = app.reload().await.unwrap();
-    assert_eq!(report.rules, 9);
+    assert_eq!(report.rules, 11);
     assert_eq!(report.policy_digest, digest);
     assert_eq!(app.audit().read(1, 10).await.unwrap().len(), 1);
 }
@@ -508,7 +509,7 @@ async fn reload_by_a_principal_needs_the_permission_to_manage_the_policy() {
 
     let admin = Principal::new("carol@example.com", PrincipalKind::Human, &["admin"]);
     let report = app.reload_by(&admin).await.unwrap();
-    assert_eq!(report.rules, 9);
+    assert_eq!(report.rules, 11);
     let records = app.audit().read(1, 10).await.unwrap();
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].kind, AuditKind::ConfigChange);

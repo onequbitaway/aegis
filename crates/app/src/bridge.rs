@@ -12,6 +12,8 @@
 //! 4. It gives the incident to the agents, and it gives the events that caused a
 //!    detection to the Monitor agent.
 //! 5. It selects the incidents for which the playbooks of the operator run.
+//! 6. It gives each new detection, with the events that caused it, to the evidence
+//!    archive, if the archive is on.
 //!
 //! [`App::replay`](crate::App::replay) calls the bridge directly. In service mode, the
 //! bus runner of the detection engine publishes on a [`DetectionBus`], which calls the
@@ -38,6 +40,7 @@ use serde_json::json;
 use tokio::sync::mpsc;
 
 use crate::activity::Activity;
+use crate::evidence::EvidenceArchive;
 use crate::incidents::{EngineMerge, SharedIncidents, is_closed};
 use crate::playbooks::Playbooks;
 use crate::settings::MonitorEvents;
@@ -49,7 +52,8 @@ pub const CORRELATOR_ACTOR: &str = "correlator";
 /// The audit actor of the playbook run records.
 pub const PLAYBOOK_ACTOR: &str = "playbook-engine";
 
-/// The number of recent events that the bridge keeps for the Monitor agent.
+/// The number of recent events that the bridge keeps for the Monitor agent and for the
+/// evidence archive.
 const RECENT_EVENTS: usize = 1024;
 /// The number of event identifiers that the bridge remembers as sent to the Monitor.
 const REMEMBERED_EVENTS: usize = 4096;
@@ -57,6 +61,8 @@ const REMEMBERED_EVENTS: usize = 4096;
 const REMEMBERED_DETECTIONS: usize = 4096;
 /// The largest number of events that one detection sends to the Monitor.
 const MAX_EVENTS_PER_DETECTION: usize = 16;
+/// The largest number of events that one detection gives to the evidence archive.
+const MAX_ARCHIVED_EVENTS_PER_DETECTION: usize = 256;
 /// The largest number of evidence links in one audit record of the bridge.
 const MAX_EVIDENCE: usize = 32;
 
@@ -209,6 +215,8 @@ pub(crate) struct Bridge {
     playbooks_enabled: bool,
     monitor_events: MonitorEvents,
     activity: Arc<Activity>,
+    /// The evidence archive. `None` if the archive is off.
+    evidence: Option<Arc<EvidenceArchive>>,
     memory: Mutex<Memory>,
     tap: Mutex<Tap>,
     counters: Counters,
@@ -235,6 +243,7 @@ impl Bridge {
             playbooks_enabled,
             monitor_events,
             activity,
+            evidence: None,
             memory: Mutex::new(Memory {
                 recent: VecDeque::new(),
                 sent_to_monitor: Remembered::new(REMEMBERED_EVENTS),
@@ -244,6 +253,20 @@ impl Bridge {
             tap: Mutex::default(),
             counters: Counters::default(),
         }
+    }
+
+    /// Sets the evidence archive. The bridge then gives it each new detection with the
+    /// events that caused the detection.
+    pub(crate) fn with_evidence(mut self, evidence: Option<Arc<EvidenceArchive>>) -> Self {
+        self.evidence = evidence;
+        self
+    }
+
+    /// Returns `true` if the bridge keeps the recent events: the Monitor agent or the
+    /// evidence archive gets the events of a detection.
+    fn keeps_recent(&self) -> bool {
+        self.evidence.is_some()
+            || (self.monitor_events == MonitorEvents::Detected && self.monitor().is_some())
     }
 
     /// Returns the counts of the work of the bridges.
@@ -291,36 +314,29 @@ impl Bridge {
 
     /// Takes one event before the detection engine examines it.
     pub(crate) fn observe_event(&self, event: &Event) {
-        let Some(runtime) = self.monitor() else {
-            return;
-        };
-        match self.monitor_events {
-            MonitorEvents::All => {
-                if lock(&self.memory).sent_to_monitor.insert(event.id) {
-                    self.send_to_monitor(runtime, event.clone());
-                }
-            }
-            MonitorEvents::Detected => self.remember(Recent::Event(Box::new(event.clone()))),
-            MonitorEvents::None => {}
+        if self.monitor_events == MonitorEvents::All
+            && let Some(runtime) = self.monitor()
+            && lock(&self.memory).sent_to_monitor.insert(event.id)
+        {
+            self.send_to_monitor(runtime, event.clone());
+        }
+        if self.keeps_recent() {
+            self.remember(Recent::Event(Box::new(event.clone())));
         }
     }
 
     /// Takes one event message from the bus before the detection engine examines it.
     fn observe_message(&self, payload: &Arc<Vec<u8>>) {
-        let Some(runtime) = self.monitor() else {
-            return;
-        };
-        match self.monitor_events {
-            MonitorEvents::All => {
-                // The detection runner records a message that is not an event.
-                if let Ok(event) = serde_json::from_slice::<Event>(payload)
-                    && lock(&self.memory).sent_to_monitor.insert(event.id)
-                {
-                    self.send_to_monitor(runtime, event);
-                }
-            }
-            MonitorEvents::Detected => self.remember(Recent::Raw(payload.clone())),
-            MonitorEvents::None => {}
+        if self.monitor_events == MonitorEvents::All
+            && let Some(runtime) = self.monitor()
+            // The detection runner records a message that is not an event.
+            && let Ok(event) = serde_json::from_slice::<Event>(payload)
+            && lock(&self.memory).sent_to_monitor.insert(event.id)
+        {
+            self.send_to_monitor(runtime, event);
+        }
+        if self.keeps_recent() {
+            self.remember(Recent::Raw(payload.clone()));
         }
     }
 
@@ -367,6 +383,40 @@ impl Bridge {
         }
         for event in &found {
             memory.sent_to_monitor.insert(event.id);
+        }
+        found.reverse();
+        found
+    }
+
+    /// Returns the recent events that caused `detection`, oldest first, for the evidence
+    /// archive. The list has the newest events of the detection if the detection has more
+    /// events than the archive takes.
+    fn events_for_archive(&self, detection: &Detection) -> Vec<Event> {
+        let mut memory = lock(&self.memory);
+        let skip = detection
+            .event_ids
+            .len()
+            .saturating_sub(MAX_ARCHIVED_EVENTS_PER_DETECTION);
+        let mut wanted: HashSet<EventId> = detection.event_ids[skip..].iter().copied().collect();
+        let mut found = Vec::new();
+        let mut position = memory.recent.len();
+        while position > 0 && !wanted.is_empty() {
+            position -= 1;
+            // Decode a bus payload one time, when a detection first needs it.
+            if let Some(Recent::Raw(payload)) = memory.recent.get(position) {
+                match serde_json::from_slice::<Event>(payload) {
+                    Ok(event) => memory.recent[position] = Recent::Event(Box::new(event)),
+                    Err(_) => {
+                        memory.recent.remove(position);
+                        continue;
+                    }
+                }
+            }
+            if let Some(Recent::Event(event)) = memory.recent.get(position)
+                && wanted.remove(&event.id)
+            {
+                found.push(event.as_ref().clone());
+            }
         }
         found.reverse();
         found
@@ -422,6 +472,11 @@ impl Bridge {
             self.audit.append(entry).await?;
             lock(&self.memory).recorded_detections.insert(detection.id);
             self.counters.detections.fetch_add(1, Ordering::Relaxed);
+            // The archive is not the audit log. A write that fails does not stop the
+            // detection: the archive counts it.
+            if let Some(archive) = &self.evidence {
+                archive.record_detection(detection, &self.events_for_archive(detection));
+            }
         }
         if self.monitor_events == MonitorEvents::Detected
             && let Some(runtime) = self.monitor()

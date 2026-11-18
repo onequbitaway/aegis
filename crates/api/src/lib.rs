@@ -72,7 +72,10 @@ pub use console::{ConsoleAsset, console_assets};
 pub use routes::{API_BASE, RoutePermission, route_permissions};
 pub use security::{API_CONTENT_SECURITY_POLICY, CONSOLE_CONTENT_SECURITY_POLICY};
 pub use server::{router, serve, serve_on};
-pub use state::{ApiParts, ApiState, ApprovalActions, ApprovalDecision, EnvLookup, process_env};
+pub use state::{
+    ApiParts, ApiState, ApprovalActions, ApprovalDecision, EnvLookup, FloodStatus, RevertActions,
+    StatusSource, SystemStatus, process_env,
+};
 
 /// Compiles the examples of the README file when the documentation tests run.
 #[cfg(doctest)]

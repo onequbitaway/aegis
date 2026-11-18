@@ -879,3 +879,260 @@ fn load_reads_a_rule_file_and_names_the_file_in_an_error() {
         "{error}"
     );
 }
+
+const SUPPRESS_BODY: &str =
+    "title: T\ndetection:\n  selection:\n    action: oauth.consent_grant\n  condition: selection\n";
+
+fn with_suppress(suppress: &str) -> String {
+    format!("{SUPPRESS_BODY}aegis.suppress:\n{}", indent(suppress))
+}
+
+#[test]
+fn a_rule_with_no_suppress_key_has_no_suppression() {
+    let rule = SigmaRule::parse(SUPPRESS_BODY, "t.yml").unwrap();
+    assert_eq!(rule.suppression(), None);
+    let null = format!("{SUPPRESS_BODY}aegis.suppress: null\n");
+    assert_eq!(
+        SigmaRule::parse(&null, "t.yml").unwrap().suppression(),
+        None
+    );
+}
+
+#[test]
+fn aegis_suppress_reads_the_window_the_fields_and_the_repeat_settings() {
+    let text = with_suppress(
+        "window_seconds: 600\nfields:\n  - actor.ip\n  - app_id\nrepeat:\n  count: 10\n  level: \
+         critical\n",
+    );
+    let rule = SigmaRule::parse(&text, "t.yml").unwrap();
+    let suppression = rule.suppression().unwrap();
+    assert_eq!(suppression.window_seconds(), 600);
+    assert_eq!(
+        suppression.fields().collect::<Vec<_>>(),
+        ["actor.ip", "app_id"]
+    );
+    assert_eq!(
+        suppression.repeat(),
+        Some(Repeat {
+            count: 10,
+            level: Severity::Critical,
+            verdict: Verdict::Malicious,
+        })
+    );
+
+    // Only the window is necessary.
+    let small = SigmaRule::parse(&with_suppress("window_seconds: 1\n"), "t.yml").unwrap();
+    let suppression = small.suppression().unwrap();
+    assert_eq!(suppression.window_seconds(), 1);
+    assert_eq!(suppression.fields().count(), 0);
+    assert_eq!(suppression.repeat(), None);
+
+    // The key can be in the map `aegis`, as `aegis.verdict` can.
+    let nested = format!(
+        "{SUPPRESS_BODY}aegis:\n  verdict: suspicious\n  suppress:\n    window_seconds: 30\n"
+    );
+    let rule = SigmaRule::parse(&nested, "t.yml").unwrap();
+    assert_eq!(rule.verdict(), Verdict::Suspicious);
+    assert_eq!(rule.suppression().unwrap().window_seconds(), 30);
+}
+
+#[test]
+fn the_repeat_settings_have_a_default_level_and_take_a_verdict() {
+    let default = with_suppress("window_seconds: 60\nrepeat:\n  count: 2\n");
+    let rule = SigmaRule::parse(&default, "t.yml").unwrap();
+    assert_eq!(
+        rule.suppression().unwrap().repeat(),
+        Some(Repeat {
+            count: 2,
+            level: Severity::High,
+            verdict: Verdict::Malicious,
+        })
+    );
+    let low = with_suppress("window_seconds: 60\nrepeat:\n  count: 3\n  level: low\n");
+    let rule = SigmaRule::parse(&low, "t.yml").unwrap();
+    assert_eq!(
+        rule.suppression().unwrap().repeat().unwrap().verdict,
+        Verdict::Suspicious
+    );
+    let forced = with_suppress(
+        "window_seconds: 60\nrepeat:\n  count: 3\n  level: medium\n  verdict: malicious\n",
+    );
+    let rule = SigmaRule::parse(&forced, "t.yml").unwrap();
+    assert_eq!(
+        rule.suppression().unwrap().repeat(),
+        Some(Repeat {
+            count: 3,
+            level: Severity::Medium,
+            verdict: Verdict::Malicious,
+        })
+    );
+}
+
+#[test]
+fn an_aegis_suppress_key_that_is_not_valid_is_an_error() {
+    let cases = [
+        (
+            format!("{SUPPRESS_BODY}aegis.suppress: 600\n"),
+            "aegis.suppress must be a map",
+        ),
+        (
+            with_suppress("fields: [actor.ip]\n"),
+            "aegis.suppress has no window_seconds",
+        ),
+        (
+            with_suppress("window_seconds: 0\n"),
+            "aegis.suppress: window_seconds must be a whole number of 1 or more",
+        ),
+        (
+            with_suppress("window_seconds: ten\n"),
+            "aegis.suppress: window_seconds must be a whole number of 1 or more",
+        ),
+        (
+            with_suppress("window_seconds: 2592001\n"),
+            "aegis.suppress: window_seconds must be 2592000 or less, but it is 2592001",
+        ),
+        (
+            with_suppress("window_seconds: 60\nwindow: 5\n"),
+            "aegis.suppress has the key \"window\", which is not known; the keys are \
+             window_seconds, fields, repeat",
+        ),
+        (
+            with_suppress("window_seconds: 60\nfields: []\n"),
+            "aegis.suppress: fields must be a list of field names that is not empty; omit the \
+             key to use the entities of the detection",
+        ),
+        (
+            with_suppress("window_seconds: 60\nfields: actor.ip\n"),
+            "aegis.suppress: fields must be a list of field names that is not empty; omit the \
+             key to use the entities of the detection",
+        ),
+        (
+            with_suppress("window_seconds: 60\nfields: [7]\n"),
+            "aegis.suppress: fields must be a list of field names",
+        ),
+        (
+            with_suppress("window_seconds: 60\nfields: [actor.address]\n"),
+            "aegis.suppress: the field \"actor.address\" is not known; the fields of actor are \
+             actor.id, actor.kind, actor.name, actor.tenant, actor.ip, actor.user_agent, \
+             actor.session_id",
+        ),
+        (
+            with_suppress("window_seconds: 60\nfields: [a, b, c, d, e, f, g, h, i]\n"),
+            "aegis.suppress: fields has 9 names; the limit is 8",
+        ),
+        (
+            with_suppress("window_seconds: 60\nrepeat: 5\n"),
+            "aegis.suppress: repeat must be a map",
+        ),
+        (
+            with_suppress("window_seconds: 60\nrepeat:\n  level: high\n"),
+            "aegis.suppress.repeat has no count",
+        ),
+        (
+            with_suppress("window_seconds: 60\nrepeat:\n  count: 1\n"),
+            "aegis.suppress: count must be a whole number of 2 or more",
+        ),
+        (
+            with_suppress("window_seconds: 60\nrepeat:\n  count: 5\n  level: severe\n"),
+            "aegis.suppress.repeat: the level \"severe\" is not known; use informational, low, \
+             medium, high, or critical",
+        ),
+        (
+            with_suppress("window_seconds: 60\nrepeat:\n  count: 5\n  verdict: benign\n"),
+            "aegis.suppress.repeat: verdict must be malicious or suspicious",
+        ),
+        (
+            with_suppress("window_seconds: 60\nrepeat:\n  count: 5\n  after: 3\n"),
+            "aegis.suppress.repeat has the key \"after\", which is not known; the keys are \
+             count, level, verdict",
+        ),
+    ];
+    for (text, expected) in cases {
+        assert_eq!(reason(&text), expected, "{text}");
+    }
+}
+
+#[test]
+fn the_suppression_key_has_one_text_for_each_field_in_lower_case() {
+    let text = with_suppress(
+        "window_seconds: 60\nfields:\n  - actor.ip\n  - actor.user_agent\n  - privileged\n  - \
+         risk_score\n  - scopes\n  - canary_id\n  - target.name\n",
+    );
+    let rule = SigmaRule::parse(&text, "t.yml").unwrap();
+    let key = rule.suppression().unwrap().key(&event()).unwrap();
+    assert_eq!(
+        key,
+        [
+            "203.0.113.50",
+            "python-httpx/0.27.0",
+            "true",
+            "72",
+            "directory.readwrite.all\u{1f}rolemanagement.readwrite.directory\u{1f}offline_access",
+            // The event does not have this field.
+            "",
+            "sync helper",
+        ]
+    );
+    // An IPv4 address in the IPv6-mapped form gives the same key.
+    let mut mapped = event();
+    mapped.actor.ip = Some(IpAddr::V6(Ipv4Addr::new(203, 0, 113, 50).to_ipv6_mapped()));
+    assert_eq!(
+        rule.suppression().unwrap().key(&mapped).unwrap()[0],
+        "203.0.113.50"
+    );
+    // A rule with no fields has no key from the event.
+    let entities = SigmaRule::parse(&with_suppress("window_seconds: 60\n"), "t.yml").unwrap();
+    assert_eq!(entities.suppression().unwrap().key(&event()), None);
+}
+
+#[test]
+fn the_detector_alone_does_not_apply_the_suppression() {
+    let text = with_suppress("window_seconds: 600\n");
+    let detector = SigmaDetector::new(vec![SigmaRule::parse(&text, "t.yml").unwrap()]);
+    for _ in 0..3 {
+        assert_eq!(detector.evaluate(&event()).len(), 1);
+    }
+}
+
+#[test]
+fn a_repeat_detection_names_the_rule_the_count_and_the_first_match() {
+    let text = "title: Consent\nid: consent-rule\ndescription: A consent.\nlevel: low\ntags:\n  - \
+         attack.t1528\ndetection:\n  selection:\n    action: oauth.consent_grant\n  condition: \
+         selection\naegis.suppress:\n  window_seconds: 600\n  repeat:\n    count: 3\n";
+    let rule = SigmaRule::parse(text, "t.yml").unwrap();
+    let first = rule.detect(&event()).unwrap();
+    let mut last_event = event();
+    last_event.id = EventId(Uuid::from_u128(9));
+    last_event.time = time() + chrono::TimeDelta::seconds(30);
+    let repeat = rule.suppression().unwrap().repeat().unwrap();
+    let found = rule.repeat_detection(&last_event, repeat, 3, (Some(event().id), first.id));
+
+    assert_eq!(found.rule_id, "consent-rule:repeated");
+    assert_eq!(found.title, "Consent: repeated");
+    assert_eq!(
+        found.description,
+        "A consent. The rule matched 3 times for one key in 600 seconds."
+    );
+    assert_eq!(found.severity, Severity::High);
+    assert_eq!(found.verdict, Verdict::Malicious);
+    assert_eq!(found.tier, DetectionTier::Deterministic);
+    assert_eq!(found.time, last_event.time);
+    assert_eq!(found.event_ids, [event().id, last_event.id]);
+    assert_eq!(found.attack, first.attack);
+    assert_eq!(found.entities, first.entities);
+    assert_eq!(found.attributes["matches"], json!(3));
+    assert_eq!(found.attributes["window_seconds"], json!(600));
+    assert_eq!(found.attributes["first_detection"], json!(first.id));
+    assert_ne!(found.id, first.id);
+    // The same matches always give the same identifier.
+    assert_eq!(
+        found.id,
+        rule.repeat_detection(&last_event, repeat, 3, (Some(event().id), first.id))
+            .id
+    );
+    // With no first event, or with the same event, the detection names the last event.
+    for first_event in [None, Some(last_event.id)] {
+        let alone = rule.repeat_detection(&last_event, repeat, 3, (first_event, first.id));
+        assert_eq!(alone.event_ids, [last_event.id]);
+    }
+}

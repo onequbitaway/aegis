@@ -17,10 +17,13 @@
 //! | `approval` | [`ApprovalRules`] | No |
 //! | `detection` | `pack`, the keys of `aegis_detect::EngineConfig`, and `runner` | Yes |
 //! | `agents` | `goal`, `monitor_events`, and the keys of [`RuntimeConfig`] | No |
-//! | `response` | `dry_run`, `playbooks`, `playbook_dir`, `graph`, `webhook`, `routes` | No |
+//! | `response` | `dry_run`, `playbooks`, `playbook_dir`, `graph`, `webhook`, `routes`, `revert` | No |
 //! | `sources` | A list of [`SourceConfig`] | No |
 //! | `ingest` | `checkpoint_dir` and `retry` | No |
 //! | `plugins` | `dir` and `limits` | No |
+//! | `decoy` | `aegis_decoy::DecoyConfig` | No |
+//! | `evidence` | `enabled`, `path`, and `max_bytes` | No |
+//! | `share` | [`ShareSettings`] | Only for the sharing commands |
 //! | `api` | `aegis_api::ApiConfig` | Only with the module `api` |
 //!
 //! A section name that is not in this table is an error. Each section rejects a key that
@@ -31,6 +34,12 @@
 //! The module `api` in the module set starts the operator API. It needs the Cargo feature
 //! `api`, the `[api]` section, and one enabled agent or more.
 //! [`Settings::check_api_module`] checks these rules.
+//!
+//! # The decoy service
+//!
+//! The `[decoy]` section starts one decoy service when the module `ingest` is in the
+//! module set. It needs the Cargo feature `decoy`. The decoy address must not be the
+//! address of the operator API.
 //!
 //! # Paths
 //!
@@ -55,10 +64,11 @@ use aegis_ingest::{RetryPolicy, SourceConfig};
 use aegis_model::ModelConfig;
 use aegis_policy::{ApprovalRules, FileAuditLogConfig, PolicyConfig, RbacConfig};
 use aegis_respond::{GraphConfig, Route, WebhookConfig};
+use ipnet::IpNet;
 use serde::{Deserialize, Serialize};
 
 /// The names of the sections that the composition root reads.
-pub const SECTIONS: [&str; 16] = [
+pub const SECTIONS: [&str; 19] = [
     "modules",
     "telemetry",
     "bus",
@@ -74,11 +84,29 @@ pub const SECTIONS: [&str; 16] = [
     "sources",
     "ingest",
     "plugins",
+    DECOY_SECTION,
+    EVIDENCE_SECTION,
+    SHARE_SECTION,
     API_SECTION,
 ];
 
 /// The name of the section of the operator API.
 pub const API_SECTION: &str = "api";
+
+/// The name of the section of the decoy service.
+pub const DECOY_SECTION: &str = "decoy";
+
+/// The name of the section of the evidence archive.
+pub const EVIDENCE_SECTION: &str = "evidence";
+
+/// The name of the section of the sharing commands.
+pub const SHARE_SECTION: &str = "share";
+
+/// The default size limit of the evidence archive: 64 MiB.
+pub const DEFAULT_EVIDENCE_BYTES: u64 = 64 * 1024 * 1024;
+
+/// The smallest size limit of the evidence archive: 64 KiB.
+pub const MIN_EVIDENCE_BYTES: u64 = 64 * 1024;
 
 /// The default goal of the operator.
 pub const DEFAULT_GOAL: &str = "Keep the environment of the operator safe.";
@@ -185,6 +213,83 @@ pub struct ResponseSettings {
     pub environment: serde_json::Value,
     /// The maximum time for one connector call, in seconds.
     pub execution_timeout_seconds: u64,
+    /// The `[response.revert]` table: the timed revert. `None` means that the timed
+    /// revert is off. The dispatcher then refuses a request with a revert time that is
+    /// not a dry run.
+    pub revert: Option<RevertSettings>,
+}
+
+/// The `[response.revert]` table: the store and the timing of the timed reverts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RevertSettings {
+    /// The file that holds the pending reverts. One process uses one file.
+    pub store: PathBuf,
+    /// The delay after the first revert attempt that fails, in seconds.
+    pub retry_base_seconds: u64,
+    /// The longest delay between two revert attempts, in seconds.
+    pub retry_max_seconds: u64,
+    /// The time between two examinations of an approval that a revert waits for, in
+    /// seconds.
+    pub approval_poll_seconds: u64,
+}
+
+/// The `[evidence]` section: the archive of the detections and their events.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EvidenceSettings {
+    /// The archive file, as JSON Lines.
+    pub path: PathBuf,
+    /// The largest number of bytes that the archive keeps on the disk.
+    pub max_bytes: u64,
+}
+
+/// One hosting network of the `[share]` section.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ShareNetwork {
+    /// The addresses of the network in CIDR form, for example `203.0.113.0/24`.
+    pub prefix: IpNet,
+    /// The name of the network or of its operator.
+    pub name: String,
+    /// The abuse contact of the network.
+    #[serde(default)]
+    pub abuse_contact: Option<String>,
+}
+
+/// The organization that sends a report, from the `[share]` section.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ShareReporter {
+    /// The name that the receiver sees.
+    pub name: String,
+    /// How the receiver can reply, for example a mailbox.
+    #[serde(default)]
+    pub contact: Option<String>,
+}
+
+/// The `[share]` section: the rules of the sharing commands.
+///
+/// The sharing commands write documents that the operator can send to other defenders.
+/// They refuse to run with no `operator_networks`, because an address of the operator
+/// must not be in such a document.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ShareSettings {
+    /// The address rules. `operator_networks` holds all public networks of the operator.
+    pub addresses: aegis_share::AddressPolicy,
+    /// The domains of the operator. An export never gives them or their subdomains.
+    pub operator_domains: Vec<String>,
+    /// The organization that sends a report. With `None`, a report names no reporter.
+    pub reporter: Option<ShareReporter>,
+    /// The hosting networks that the operator knows. A report package then has one more
+    /// report for each of these networks.
+    pub networks: Vec<ShareNetwork>,
+}
+
+impl ShareSettings {
+    /// Returns `true` if the section names one operator network or more.
+    #[must_use]
+    pub fn has_operator_networks(&self) -> bool {
+        !self.addresses.operator_networks.is_empty()
+    }
 }
 
 /// The `[ingest]` section.
@@ -256,6 +361,14 @@ pub struct Settings {
     pub ingest: IngestSettings,
     /// The `[plugins]` section.
     pub plugins: Option<PluginSettings>,
+    /// The `[decoy]` section: the decoy service. `None` means that the process has no
+    /// decoy.
+    #[cfg(feature = "decoy")]
+    pub decoy: Option<aegis_decoy::DecoyConfig>,
+    /// The `[evidence]` section. `None` means that the archive is off.
+    pub evidence: Option<EvidenceSettings>,
+    /// The `[share]` section.
+    pub share: ShareSettings,
     /// The `[api]` section: the operator API.
     ///
     /// `None` means that the document has no `[api]` section, or that a different
@@ -271,6 +384,14 @@ type ApiSection = Option<aegis_api::ApiConfig>;
 /// A build without the Cargo feature `api` keeps no value of the `[api]` section.
 #[cfg(not(feature = "api"))]
 type ApiSection = ();
+
+/// The value of the `[decoy]` section in this build.
+#[cfg(feature = "decoy")]
+type DecoySection = Option<aegis_decoy::DecoyConfig>;
+
+/// A build without the Cargo feature `decoy` keeps no value of the `[decoy]` section.
+#[cfg(not(feature = "decoy"))]
+type DecoySection = ();
 
 /// A table that accepts no key.
 #[derive(Deserialize)]
@@ -378,6 +499,61 @@ struct ResponseSection {
     routes: Vec<Route>,
     environment: serde_json::Value,
     execution_timeout_seconds: u64,
+    revert: Option<RevertSection>,
+}
+
+/// The `[response.revert]` table.
+#[derive(Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct RevertSection {
+    enabled: bool,
+    store: Option<PathBuf>,
+    retry_base_seconds: u64,
+    retry_max_seconds: u64,
+    approval_poll_seconds: u64,
+}
+
+impl Default for RevertSection {
+    fn default() -> Self {
+        let scheduler = aegis_respond::RevertSchedulerConfig::default();
+        Self {
+            enabled: true,
+            store: None,
+            retry_base_seconds: scheduler.retry_base.as_secs(),
+            retry_max_seconds: scheduler.retry_max.as_secs(),
+            approval_poll_seconds: scheduler.approval_poll.as_secs(),
+        }
+    }
+}
+
+/// The `[evidence]` section.
+#[derive(Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct EvidenceSection {
+    enabled: bool,
+    path: Option<PathBuf>,
+    max_bytes: u64,
+}
+
+impl Default for EvidenceSection {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            path: None,
+            max_bytes: DEFAULT_EVIDENCE_BYTES,
+        }
+    }
+}
+
+/// The `[share]` section.
+#[derive(Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+struct ShareSection {
+    operator_networks: Vec<IpNet>,
+    operator_domains: Vec<String>,
+    permit_documentation_ranges: bool,
+    reporter: Option<ShareReporter>,
+    networks: Vec<ShareNetwork>,
 }
 
 impl Default for ResponseSection {
@@ -392,6 +568,7 @@ impl Default for ResponseSection {
             routes: Vec::new(),
             environment: serde_json::Value::Null,
             execution_timeout_seconds: 120,
+            revert: None,
         }
     }
 }
@@ -478,6 +655,22 @@ fn resolve_in_place(base: &Path, path: &mut PathBuf) {
 
 fn config_error(section: &str, problem: impl std::fmt::Display) -> Error {
     Error::Config(format!("the section `{section}` is not valid: {problem}"))
+}
+
+/// Returns `true` if two listeners of one host cannot both open.
+///
+/// The two addresses have the same port, and they have the same address or one of them
+/// covers all interfaces. With the port 0, the operating system selects a free port, so
+/// such a listener never has the port of a different listener.
+#[cfg(all(feature = "decoy", feature = "api"))]
+fn same_listener(first: std::net::SocketAddr, second: std::net::SocketAddr) -> bool {
+    if first.port() == 0 || second.port() == 0 {
+        return false;
+    }
+    first.port() == second.port()
+        && (first.ip() == second.ip()
+            || first.ip().is_unspecified()
+            || second.ip().is_unspecified())
 }
 
 impl Settings {
@@ -611,7 +804,22 @@ impl Settings {
         let sources = take(Self::sources(config, base_dir), &mut problems);
         let ingest = take(Self::ingest(config, base_dir), &mut problems);
         let plugins = take(Self::plugins(config, base_dir), &mut problems);
+        let decoy = take(Self::decoy(config), &mut problems);
+        let evidence = take(Self::evidence(config, base_dir), &mut problems);
+        let share = take(Self::share(config), &mut problems);
         let api = take(Self::api(config, extra_sections), &mut problems);
+        #[cfg(feature = "decoy")]
+        if let (Some(Some(decoy)), Some(sources)) = (&decoy, &sources)
+            && let Err(error) = Self::decoy_name(decoy, sources)
+        {
+            problems.push(error);
+        }
+        #[cfg(all(feature = "decoy", feature = "api"))]
+        if let (Some(Some(decoy)), Some(Some(api))) = (&decoy, &api)
+            && let Err(error) = Self::decoy_address(decoy, api)
+        {
+            problems.push(error);
+        }
         #[cfg(feature = "api")]
         if let (Some(Some(api)), Some(agents), Some(detection)) = (&api, &agents, &detection)
             && let Err(error) = Self::api_durable_names(api, agents, &detection.runner)
@@ -626,6 +834,8 @@ impl Settings {
             // A build without the Cargo feature `api` keeps no value of the section.
             #[cfg(not(feature = "api"))]
             api?;
+            #[cfg(not(feature = "decoy"))]
+            decoy?;
             Some(Self {
                 base_dir: base_dir.to_path_buf(),
                 modules: modules?,
@@ -643,6 +853,10 @@ impl Settings {
                 sources: sources?,
                 ingest: ingest?,
                 plugins: plugins?,
+                #[cfg(feature = "decoy")]
+                decoy: decoy?,
+                evidence: evidence?,
+                share: share?,
                 #[cfg(feature = "api")]
                 api: api?,
             })
@@ -753,6 +967,12 @@ impl Settings {
 
     fn detection(config: &Config, base_dir: &Path) -> Result<DetectionSettings> {
         let section: DetectionSection = config.section("detection")?;
+        // The limit on the states of one incident applies in the service and in a replay.
+        aegis_detect::IncidentCoalescer::new(
+            section.runner.max_incident_updates,
+            section.runner.incident_update_window_seconds,
+        )
+        .map_err(|error| config_error("detection", format!("runner: {error}")))?;
         Ok(DetectionSettings {
             pack: resolve(base_dir, &section.pack),
             engine: EngineConfig {
@@ -834,7 +1054,171 @@ impl Settings {
             routes: section.routes,
             environment: section.environment,
             execution_timeout_seconds: section.execution_timeout_seconds,
+            revert: Self::revert(section.revert, base_dir)?,
         })
+    }
+
+    /// Checks the `[response.revert]` table. A table with `enabled = false` is the same
+    /// as no table.
+    fn revert(section: Option<RevertSection>, base_dir: &Path) -> Result<Option<RevertSettings>> {
+        let Some(section) = section.filter(|section| section.enabled) else {
+            return Ok(None);
+        };
+        let Some(store) = section.store else {
+            return Err(config_error(
+                "response",
+                "revert.enabled needs the key `revert.store`: the file that holds the pending \
+                 reverts",
+            ));
+        };
+        if section.retry_base_seconds == 0 || section.approval_poll_seconds == 0 {
+            return Err(config_error(
+                "response",
+                "revert.retry_base_seconds and revert.approval_poll_seconds must be larger \
+                 than 0",
+            ));
+        }
+        if section.retry_max_seconds < section.retry_base_seconds {
+            return Err(config_error(
+                "response",
+                "revert.retry_max_seconds must not be less than revert.retry_base_seconds",
+            ));
+        }
+        Ok(Some(RevertSettings {
+            store: resolve(base_dir, &store),
+            retry_base_seconds: section.retry_base_seconds,
+            retry_max_seconds: section.retry_max_seconds,
+            approval_poll_seconds: section.approval_poll_seconds,
+        }))
+    }
+
+    /// Reads the `[evidence]` section. A section with `enabled = false` is the same as no
+    /// section.
+    fn evidence(config: &Config, base_dir: &Path) -> Result<Option<EvidenceSettings>> {
+        if !config.has_section(EVIDENCE_SECTION) {
+            return Ok(None);
+        }
+        let section: EvidenceSection = config.section(EVIDENCE_SECTION)?;
+        if !section.enabled {
+            return Ok(None);
+        }
+        let Some(path) = section.path else {
+            return Err(config_error(
+                EVIDENCE_SECTION,
+                "enabled needs the key `path`: the archive file",
+            ));
+        };
+        if section.max_bytes < MIN_EVIDENCE_BYTES {
+            return Err(config_error(
+                EVIDENCE_SECTION,
+                format!("max_bytes must be {MIN_EVIDENCE_BYTES} or more"),
+            ));
+        }
+        Ok(Some(EvidenceSettings {
+            path: resolve(base_dir, &path),
+            max_bytes: section.max_bytes,
+        }))
+    }
+
+    /// Reads the `[share]` section.
+    fn share(config: &Config) -> Result<ShareSettings> {
+        let section: ShareSection = config.section_or_default(SHARE_SECTION)?;
+        let addresses = aegis_share::AddressPolicy {
+            operator_networks: section.operator_networks,
+            permit_documentation_ranges: section.permit_documentation_ranges,
+        };
+        for (index, domain) in section.operator_domains.iter().enumerate() {
+            if domain.trim().is_empty() {
+                return Err(config_error(
+                    SHARE_SECTION,
+                    format!("operator_domains[{index}] is empty"),
+                ));
+            }
+        }
+        for (index, network) in section.networks.iter().enumerate() {
+            if network.name.trim().is_empty() {
+                return Err(config_error(
+                    SHARE_SECTION,
+                    format!("networks[{index}].name is empty"),
+                ));
+            }
+        }
+        if let Some(reporter) = &section.reporter
+            && reporter.name.trim().is_empty()
+        {
+            return Err(config_error(SHARE_SECTION, "reporter.name is empty"));
+        }
+        Ok(ShareSettings {
+            addresses,
+            operator_domains: section.operator_domains,
+            reporter: section.reporter,
+            networks: section.networks,
+        })
+    }
+
+    /// Reads and checks the `[decoy]` section.
+    #[cfg(feature = "decoy")]
+    fn decoy(config: &Config) -> Result<DecoySection> {
+        if !config.has_section(DECOY_SECTION) {
+            return Ok(None);
+        }
+        let decoy: aegis_decoy::DecoyConfig = config.section(DECOY_SECTION)?;
+        decoy
+            .validate()
+            .map_err(|error| section_error(DECOY_SECTION, error))?;
+        Ok(Some(decoy))
+    }
+
+    /// Refuses the `[decoy]` section, because this build cannot read it.
+    #[cfg(not(feature = "decoy"))]
+    fn decoy(config: &Config) -> Result<DecoySection> {
+        if config.has_section(DECOY_SECTION) {
+            return Err(config_error(
+                DECOY_SECTION,
+                "the section needs the Cargo feature `decoy`, and this build does not have it",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Checks that the decoy and a configured source do not have one connector name.
+    ///
+    /// The name of a connector is one token of its bus subject. Two connectors with one
+    /// name would publish on one subject.
+    #[cfg(feature = "decoy")]
+    fn decoy_name(decoy: &aegis_decoy::DecoyConfig, sources: &[SourceConfig]) -> Result<()> {
+        if sources.iter().any(|source| source.name() == decoy.id) {
+            return Err(config_error(
+                DECOY_SECTION,
+                format!(
+                    "id is `{}`, which is the name of a source in `[[sources]]`. Use a \
+                     different name",
+                    decoy.id
+                ),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Refuses a decoy on the address of the operator API.
+    ///
+    /// The decoy is for clients that have no permission. The operator API is for the
+    /// operator. One listener cannot be the two, and a decoy that takes the address of the
+    /// API stops the API.
+    #[cfg(all(feature = "decoy", feature = "api"))]
+    fn decoy_address(decoy: &aegis_decoy::DecoyConfig, api: &aegis_api::ApiConfig) -> Result<()> {
+        if same_listener(decoy.bind, api.bind) {
+            return Err(config_error(
+                DECOY_SECTION,
+                format!(
+                    "bind is {}, which is the address of the operator API (api.bind = {}). A \
+                     decoy must not be on the address of the operator API. Use a different \
+                     port, and prefer a different network interface",
+                    decoy.bind, api.bind
+                ),
+            ));
+        }
+        Ok(())
     }
 
     fn plugins(config: &Config, base_dir: &Path) -> Result<Option<PluginSettings>> {
@@ -1277,6 +1661,272 @@ mod tests {
                 AgentRole::Responder
             ]
         );
+    }
+
+    #[test]
+    fn the_flood_protection_settings_load_from_the_detection_section() {
+        // The defaults of the detection crate.
+        let defaults = read(MINIMAL).unwrap().detection;
+        assert!(defaults.engine.velocity.machine_cadence.enabled);
+        assert_eq!(defaults.engine.velocity.machine_cadence.min_actions, 4);
+        assert!(defaults.engine.velocity.endpoint_probe.enabled);
+        assert_eq!(defaults.engine.triage.quota_window_seconds, 3600);
+        assert_eq!(defaults.engine.triage.max_requests_per_source, 120);
+        assert_eq!(defaults.engine.triage.max_requests_per_tenant, 240);
+        assert_eq!(defaults.runner.max_incident_updates, 20);
+        assert_eq!(defaults.runner.incident_update_window_seconds, 60);
+
+        let text = MINIMAL.to_owned()
+            + r#"
+            [detection.velocity.machine_cadence]
+            min_actions = 6
+            max_median_gap_milliseconds = 2000
+            ignored_principals = ["sp-provisioning"]
+            follow_addresses = false
+
+            [detection.velocity.endpoint_probe]
+            distinct_path_threshold = 40
+            decoy_paths = ["/.env", "/admin/backup/*"]
+            decoy_path_severity = "high"
+
+            [detection.velocity.sign_in_burst]
+            failure_threshold = 50
+
+            [detection.triage]
+            quota_window_seconds = 600
+            max_requests_per_source = 10
+            max_requests_per_tenant = 30
+
+            [detection.runner]
+            durable_name = "soc-detect"
+            max_incident_updates = 5
+            incident_update_window_seconds = 120
+            "#;
+        let detection = read(&text).unwrap().detection;
+        let cadence = &detection.engine.velocity.machine_cadence;
+        assert_eq!(cadence.min_actions, 6);
+        assert_eq!(cadence.max_median_gap_milliseconds, 2000);
+        assert_eq!(cadence.ignored_principals, ["sp-provisioning"]);
+        assert!(!cadence.follow_addresses);
+        // A key that the table does not set keeps its default.
+        assert_eq!(cadence.window_seconds, 300);
+        let probe = &detection.engine.velocity.endpoint_probe;
+        assert_eq!(probe.distinct_path_threshold, 40);
+        assert_eq!(probe.decoy_paths, ["/.env", "/admin/backup/*"]);
+        assert_eq!(
+            probe.decoy_path_severity,
+            aegis_contracts::common::Severity::High
+        );
+        assert_eq!(
+            detection.engine.velocity.sign_in_burst.failure_threshold,
+            50
+        );
+        assert_eq!(detection.engine.triage.quota_window_seconds, 600);
+        assert_eq!(detection.engine.triage.max_requests_per_source, 10);
+        assert_eq!(detection.engine.triage.max_requests_per_tenant, 30);
+        assert_eq!(detection.runner.durable_name, "soc-detect");
+        assert_eq!(detection.runner.max_incident_updates, 5);
+        assert_eq!(detection.runner.incident_update_window_seconds, 120);
+
+        // A limit of zero is an error of the section, before the engine starts.
+        for (table, key) in [
+            ("runner", "max_incident_updates = 0"),
+            ("runner", "incident_update_window_seconds = 0"),
+        ] {
+            let message = config_message(&format!("{MINIMAL}\n[detection.{table}]\n{key}\n"));
+            assert!(
+                message.starts_with("the section `detection` is not valid: runner: "),
+                "{key}: {message}"
+            );
+        }
+        let message = config_message(&format!(
+            "{MINIMAL}\n[detection.velocity.machine_cadence]\nmin_action = 6\n"
+        ));
+        assert!(
+            message.starts_with("the section `detection` is not valid:")
+                && message.contains("unknown field"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn the_revert_table_gives_the_store_and_the_timing() {
+        // No table: the timed revert is off.
+        assert_eq!(read(MINIMAL).unwrap().response.revert, None);
+
+        let settings = read(&with(
+            "[response.revert]\nstore = \"data/pending-reverts.json\"\n",
+        ))
+        .unwrap();
+        assert_eq!(
+            settings.response.revert,
+            Some(RevertSettings {
+                store: PathBuf::from("/etc/aegis/data/pending-reverts.json"),
+                retry_base_seconds: 30,
+                retry_max_seconds: 1800,
+                approval_poll_seconds: 60,
+            })
+        );
+        let settings = read(&with(
+            "[response.revert]\nstore = \"/var/lib/aegis/reverts.json\"\nretry_base_seconds = 5\n\
+             retry_max_seconds = 50\napproval_poll_seconds = 10\n",
+        ))
+        .unwrap();
+        assert_eq!(
+            settings.response.revert,
+            Some(RevertSettings {
+                store: PathBuf::from("/var/lib/aegis/reverts.json"),
+                retry_base_seconds: 5,
+                retry_max_seconds: 50,
+                approval_poll_seconds: 10,
+            })
+        );
+        // The switch turns the timed revert off, with or without a store.
+        for text in [
+            "[response.revert]\nenabled = false\n",
+            "[response.revert]\nenabled = false\nstore = \"data/pending-reverts.json\"\n",
+        ] {
+            assert_eq!(read(&with(text)).unwrap().response.revert, None, "{text}");
+        }
+
+        for (text, cause) in [
+            (
+                "[response.revert]\n",
+                "revert.enabled needs the key `revert.store`",
+            ),
+            (
+                "[response.revert]\nstore = \"x.json\"\nretry_base_seconds = 0\n",
+                "must be larger than 0",
+            ),
+            (
+                "[response.revert]\nstore = \"x.json\"\napproval_poll_seconds = 0\n",
+                "must be larger than 0",
+            ),
+            (
+                "[response.revert]\nstore = \"x.json\"\nretry_base_seconds = 60\nretry_max_seconds = 30\n",
+                "revert.retry_max_seconds must not be less than revert.retry_base_seconds",
+            ),
+            ("[response.revert]\nstores = \"x.json\"\n", "unknown field"),
+        ] {
+            let message = config_message(&with(text));
+            assert!(
+                message.starts_with("the section `response` is not valid:")
+                    && message.contains(cause),
+                "{text}: {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_evidence_section_gives_the_archive_file_and_its_limit() {
+        assert_eq!(read(MINIMAL).unwrap().evidence, None);
+        let settings = read(&with("[evidence]\npath = \"data/evidence.jsonl\"\n")).unwrap();
+        assert_eq!(
+            settings.evidence,
+            Some(EvidenceSettings {
+                path: PathBuf::from("/etc/aegis/data/evidence.jsonl"),
+                max_bytes: DEFAULT_EVIDENCE_BYTES,
+            })
+        );
+        let settings = read(&with(
+            "[evidence]\npath = \"/var/lib/aegis/evidence.jsonl\"\nmax_bytes = 1048576\n",
+        ))
+        .unwrap();
+        assert_eq!(
+            settings.evidence,
+            Some(EvidenceSettings {
+                path: PathBuf::from("/var/lib/aegis/evidence.jsonl"),
+                max_bytes: 1_048_576,
+            })
+        );
+        assert_eq!(
+            read(&with("[evidence]\nenabled = false\n"))
+                .unwrap()
+                .evidence,
+            None
+        );
+        for (text, cause) in [
+            ("[evidence]\n", "enabled needs the key `path`"),
+            (
+                "[evidence]\npath = \"e.jsonl\"\nmax_bytes = 1024\n",
+                "max_bytes must be 65536 or more",
+            ),
+            ("[evidence]\nfile = \"e.jsonl\"\n", "unknown field"),
+        ] {
+            let message = config_message(&with(text));
+            assert!(
+                message.starts_with("the section `evidence` is not valid:")
+                    && message.contains(cause),
+                "{text}: {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_share_section_gives_the_operator_networks_and_the_receivers() {
+        let none = read(MINIMAL).unwrap().share;
+        assert_eq!(none, ShareSettings::default());
+        assert!(!none.has_operator_networks());
+
+        let share = read(&with(
+            r#"
+            [share]
+            operator_networks = ["198.51.100.0/24", "2001:db8:1::/48"]
+            operator_domains = ["operator.example.org"]
+
+            [share.reporter]
+            name = "Example Security Team"
+            contact = "soc@operator.example.org"
+
+            [[share.networks]]
+            prefix = "203.0.113.0/24"
+            name = "AS64500 Example Hosting"
+            abuse_contact = "abuse@hosting.example"
+            "#,
+        ))
+        .unwrap()
+        .share;
+        assert!(share.has_operator_networks());
+        assert_eq!(
+            share.addresses.operator_networks,
+            [
+                "198.51.100.0/24".parse::<IpNet>().unwrap(),
+                "2001:db8:1::/48".parse::<IpNet>().unwrap()
+            ]
+        );
+        assert!(!share.addresses.permit_documentation_ranges);
+        assert_eq!(share.operator_domains, ["operator.example.org"]);
+        assert_eq!(
+            share.reporter,
+            Some(ShareReporter {
+                name: "Example Security Team".to_owned(),
+                contact: Some("soc@operator.example.org".to_owned()),
+            })
+        );
+        assert_eq!(
+            share.networks,
+            [ShareNetwork {
+                prefix: "203.0.113.0/24".parse().unwrap(),
+                name: "AS64500 Example Hosting".to_owned(),
+                abuse_contact: Some("abuse@hosting.example".to_owned()),
+            }]
+        );
+
+        for text in [
+            "[share]\noperator_networks = [\"198.51.100.0\"]\n",
+            "[share]\noperator_networks = [\"not-a-network\"]\n",
+            "[share]\noperator_network = [\"198.51.100.0/24\"]\n",
+            "[share]\noperator_domains = [\" \"]\n",
+            "[share.reporter]\nname = \"\"\n",
+            "[[share.networks]]\nprefix = \"203.0.113.0/24\"\nname = \" \"\n",
+            "[[share.networks]]\nprefix = \"203.0.113.300/24\"\nname = \"x\"\n",
+        ] {
+            let message = config_message(&with(text));
+            assert!(
+                message.starts_with("the section `share` is not valid:"),
+                "{text}: {message}"
+            );
+        }
     }
 
     #[test]

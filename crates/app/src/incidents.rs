@@ -26,6 +26,7 @@ use crate::activity::Activity;
 const MAX_REMEMBERED_SUMMARIES: usize = 20_000;
 
 type ClosedHook = Box<dyn Fn(IncidentId) + Send + Sync>;
+type WrittenHook = Box<dyn Fn(&Incident) + Send + Sync>;
 
 /// Returns `true` if no more work is necessary on an incident in this state.
 #[must_use]
@@ -215,6 +216,7 @@ pub struct SharedIncidents {
     /// The gate for writes, and the last summary of the engine for each open incident.
     writes: tokio::sync::Mutex<EngineSummaries>,
     closed_hooks: Vec<ClosedHook>,
+    written_hooks: Vec<WrittenHook>,
 }
 
 impl SharedIncidents {
@@ -226,7 +228,16 @@ impl SharedIncidents {
             activity,
             writes: tokio::sync::Mutex::default(),
             closed_hooks: Vec::new(),
+            written_hooks: Vec::new(),
         }
+    }
+
+    /// Adds a function that the store calls after each write, with the incident as the
+    /// store has it.
+    #[must_use]
+    pub fn on_written(mut self, hook: impl Fn(&Incident) + Send + Sync + 'static) -> Self {
+        self.written_hooks.push(Box::new(hook));
+        self
     }
 
     /// Adds a function that the store calls after it writes an incident with the state
@@ -238,6 +249,9 @@ impl SharedIncidents {
     }
 
     fn written(&self, incident: &Incident) {
+        for hook in &self.written_hooks {
+            hook(incident);
+        }
         if is_closed(incident.status) {
             for hook in &self.closed_hooks {
                 hook(incident.id);

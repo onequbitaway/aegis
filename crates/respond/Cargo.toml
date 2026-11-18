@@ -26,6 +26,8 @@ tracing.workspace = true
 url = "2.5.8"
 
 [dev-dependencies]
+# The tests of the policy example in `policies/examples` use the real policy engine.
+aegis-policy.workspace = true
 aegis-testkit.workspace = true
 tempfile = "3.27.0"
 tokio = { workspace = true, features = ["test-util"] }

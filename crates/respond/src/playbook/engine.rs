@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 use super::template::{self, Scope};
 use super::{Playbook, PlaybookError, PlaybookOrigin, Step};
 use crate::names::{error_kind, truncate};
+use crate::revert::REVERT_AFTER_PARAMETER;
 
 /// The principal identifier of requests from a playbook that the operator wrote.
 pub const PLAYBOOK_PRINCIPAL_ID: &str = "playbook-engine";
@@ -149,6 +150,8 @@ pub struct LoadReport {
 /// - `incident_id`: the incident.
 /// - `evidence`: a link to the incident, then a link to each detection of the incident
 ///   (the first 64).
+/// - `parameters`: the parameters of the step. A step with `revert_after` also gives the
+///   parameter `revert_after_seconds`.
 ///
 /// The principal of a playbook request is [`PLAYBOOK_PRINCIPAL_ID`] with the type
 /// [`PrincipalKind::System`]. The principal of a draft request is [`DRAFT_PRINCIPAL_ID`]
@@ -247,6 +250,11 @@ fn build_request(
                 .map_err(|error| format!("parameter {name}: {error}"))?
         };
         request.parameters.insert(name.clone(), value);
+    }
+    if let Some(seconds) = step.revert_after {
+        request
+            .parameters
+            .insert(REVERT_AFTER_PARAMETER.to_owned(), seconds.into());
     }
     request.incident_id = Some(incident.id);
     request.evidence = evidence(playbook, step, incident);

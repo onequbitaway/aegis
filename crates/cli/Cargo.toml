@@ -12,9 +12,12 @@ name = "aegis"
 path = "src/main.rs"
 
 [features]
-default = ["postgres", "plugins", "otlp", "api"]
-# The operator API: the module `api` and the `[api]` section.
-api = ["aegis-app/api"]
+default = ["postgres", "plugins", "otlp", "api", "decoy"]
+# The operator API: the module `api` and the `[api]` section. The feature also gives the
+# commands that call the operator API of a running service: `aegis reverts`.
+api = ["aegis-app/api", "dep:reqwest"]
+# The decoy service: the `[decoy]` section.
+decoy = ["aegis-app/decoy"]
 # The gRPC services of the operator API, on the port of the REST API.
 grpc = ["api", "aegis-app/grpc"]
 # PostgreSQL storage: `storage.kind = "postgres"` and `audit.kind = "postgres"`.
@@ -31,8 +34,11 @@ aegis-core.workspace = true
 aegis-ingest.workspace = true
 aegis-policy.workspace = true
 anyhow.workspace = true
+chrono.workspace = true
 clap = { version = "4.6.7", features = ["derive"] }
 futures.workspace = true
+# The client of the operator API, for the commands `aegis reverts`.
+reqwest = { version = "0.13.5", default-features = false, features = ["rustls", "json"], optional = true }
 rustls = { version = "0.23.46", default-features = false, features = ["aws_lc_rs", "std"] }
 serde.workspace = true
 serde_json.workspace = true
@@ -42,6 +48,8 @@ tracing.workspace = true
 
 [dev-dependencies]
 aegis-testkit.workspace = true
+hex.workspace = true
+sha2.workspace = true
 
 [lints]
 workspace = true

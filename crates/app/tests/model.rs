@@ -99,7 +99,7 @@ async fn a_replay_with_a_local_model_sends_chat_requests_and_completes() {
 
     // The run completes with the same detections and one incident.
     assert!(report.model);
-    assert_eq!(report.detections.len(), 8);
+    assert_eq!(report.detections.len(), 9);
     assert_eq!(report.incidents.len(), 1);
     let incident = &report.incidents[0];
     assert_eq!(incident.severity, Severity::Critical);

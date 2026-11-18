@@ -1,6 +1,7 @@
 name: aegis-identity
-version: "0.1.0"
+version: "0.2.0"
 description: >-
-  Detection rules and example indicators for attacks on identity systems: consent to
-  privileged permissions, privileged role changes by workload identities, new accounts,
-  legacy authentication, multi-factor authentication abuse, and honeytoken use.
+  Detection rules and example indicators for attacks on identity systems and for contact
+  with decoys: consent to privileged permissions, privileged role changes by workload
+  identities, new accounts, legacy authentication, multi-factor authentication abuse,
+  honeytoken use, decoy contact, and canary instructions that an automated agent follows.

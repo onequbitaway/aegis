@@ -30,10 +30,13 @@ steps:
     target:
       each_entity: host
     max_targets: 5
+    # An isolated host stops the service that it runs. If no person confirms the isolation
+    # in 4 hours, AEGIS releases the host.
+    revert_after: 4h
     reason: >-
       Incident {{incident.id}} ({{incident.severity}}): the host {{target.name}} runs
-      attacker code ({{incident.techniques}}). Isolate it from the network. The operator
-      can release it again.
+      attacker code ({{incident.techniques}}). Isolate it from the network. AEGIS releases
+      it after 4 hours, unless a person confirms the isolation.
     continue_on_error: true
 
   - id: open-ticket
@@ -47,5 +50,6 @@ steps:
       title: "Isolated host: {{incident.title}}"
       priority: "{{incident.severity}}"
     reason: >-
-      Incident {{incident.id}}: examine and rebuild each isolated host.
+      Incident {{incident.id}}: examine and rebuild each isolated host. Confirm each
+      isolation that must stay. AEGIS releases a host with no confirmation after 4 hours.
     continue_on_error: true

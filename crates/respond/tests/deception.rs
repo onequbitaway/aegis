@@ -430,6 +430,40 @@ async fn an_actor_that_is_a_decoy_identity_trips_with_a_severity_of_high_or_more
 }
 
 #[tokio::test]
+async fn an_actor_that_is_the_source_address_is_one_entity() {
+    // A decoy service has no account for its client. The actor of its events is the
+    // address of the client, and `actor.ip` is the same address.
+    let registry = registry().await;
+    let token = registry
+        .issue(decoy_secret("kv-prod/decoy-for-an-address-actor"))
+        .await
+        .unwrap();
+    let address = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 9));
+    let event = Event::new(
+        fixtures::base_time(),
+        fixtures::source(),
+        EventClass::Authentication,
+        action::HONEYTOKEN_TRIP,
+        Actor::new(EntityKind::IpAddress, address.to_string()).with_ip(address),
+    )
+    .with_attribute(attr::HONEYTOKEN_ID, token.id.clone());
+
+    let detection = only(
+        HoneytokenTripDetector::new(registry)
+            .inspect(&event)
+            .await
+            .unwrap(),
+    );
+
+    // The detection names the address one time.
+    assert_eq!(
+        detection.entities,
+        [EntityRef::new(EntityKind::IpAddress, "203.0.113.9")]
+    );
+    assert_eq!(detection.attributes["match"], "honeytoken_id");
+}
+
+#[tokio::test]
 async fn a_retired_honeytoken_does_not_trip() {
     let registry = registry().await;
     let token = registry

@@ -25,3 +25,9 @@ level: low
 tags:
   - attack.credential-access
   - attack.t1110
+# An attacker with no access can cause this event in any number. One account gives one
+# detection in 15 minutes.
+aegis.suppress:
+  window_seconds: 900
+  fields:
+    - actor.id

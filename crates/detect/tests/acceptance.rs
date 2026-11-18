@@ -12,8 +12,8 @@ use aegis_contracts::{Detection, DetectionTier, Incident, IncidentStatus, Verdic
 use aegis_detect::engine::{DetectionEngine, EngineConfig};
 use aegis_detect::pack::RulePack;
 use aegis_detect::velocity::{
-    CREDENTIAL_AFTER_GRANT_RULE_ID, IMPOSSIBLE_SPEED_RULE_ID, PRIVILEGED_SELF_ASSIGNMENT_RULE_ID,
-    SIGN_IN_AFTER_BURST_RULE_ID, SIGN_IN_BURST_RULE_ID,
+    CREDENTIAL_AFTER_GRANT_RULE_ID, IMPOSSIBLE_SPEED_RULE_ID, MACHINE_CADENCE_RULE_ID,
+    PRIVILEGED_SELF_ASSIGNMENT_RULE_ID, SIGN_IN_AFTER_BURST_RULE_ID, SIGN_IN_BURST_RULE_ID,
 };
 use aegis_testkit::ScriptedModel;
 use aegis_testkit::fixtures::{self, expected};
@@ -157,6 +157,9 @@ async fn the_replay_gives_these_detections_in_this_order() {
             WORKLOAD_ROLE_RULE_ID,
             PRIVILEGED_SELF_ASSIGNMENT_RULE_ID,
             IMPOSSIBLE_SPEED_RULE_ID,
+            // The machine-cadence detector completes its chain with the same event as the
+            // impossible speed detector: the second API call of the rogue principal.
+            MACHINE_CADENCE_RULE_ID,
             HONEYTOKEN_RULE_ID,
         ]
     );
@@ -215,7 +218,9 @@ async fn the_detections_fold_into_one_critical_incident_with_the_attack_entities
     assert_eq!(incident.severity, Severity::Critical);
     assert_eq!(incident.status, IncidentStatus::Open);
     assert_eq!(incident.tenant.as_deref(), Some(fixtures::TENANT));
-    assert_eq!(incident.detections.len(), 8);
+    // Eight detections of the rules and the older detectors, and one machine-cadence
+    // detection.
+    assert_eq!(incident.detections.len(), 9);
     // The incident holds each detection of the replay, in order of time and identifier.
     let mut all: Vec<Detection> = replay.detections().into_iter().cloned().collect();
     all.sort_by_key(|detection| (detection.time, detection.id));
@@ -257,14 +262,17 @@ async fn the_detections_fold_into_one_critical_incident_with_the_attack_entities
             "T1098.001",
             "T1098.003",
             "T1078.004",
+            "T1059.009",
             "T1552"
         ]
     );
-    assert_eq!(incident.timeline.len(), 8);
+    assert_eq!(incident.timeline.len(), 9);
     assert!(incident.timeline.is_sorted_by_key(|entry| entry.time));
 
     // Each state that the engine returned is a state of this one incident. Seven events
-    // gave detections, and the engine returns one state for each of them.
+    // gave detections, and the engine returns one state for each of them. The
+    // machine-cadence detection comes from an event that had a detection before, so the
+    // number of states did not change.
     assert_eq!(replay.incident_states.len(), 7);
     assert!(
         replay
@@ -312,7 +320,7 @@ async fn the_normal_events_give_no_detection() {
         .map(|position| replay.events[*position].id)
         .collect();
     let detections = replay.detections();
-    assert_eq!(detections.len(), 8);
+    assert_eq!(detections.len(), 9);
     for detection in detections {
         assert!(
             detection
@@ -323,6 +331,85 @@ async fn the_normal_events_give_no_detection() {
             detection.rule_id
         );
     }
+}
+
+#[tokio::test]
+async fn the_machine_cadence_detector_finds_the_chain_of_the_rogue_principal() {
+    let replay = replay().await;
+    let detections = replay.with_rule(MACHINE_CADENCE_RULE_ID);
+    assert_eq!(detections.len(), 1);
+    let chain = detections[0];
+    // The chain has a privileged role assignment, so no model examines it.
+    assert_eq!(chain.verdict, Verdict::Malicious);
+    assert_eq!(chain.severity, Severity::High);
+    assert_eq!(chain.tier, DetectionTier::Deterministic);
+    let technique_ids: Vec<&str> = chain
+        .attack
+        .iter()
+        .map(|technique| technique.technique_id.as_str())
+        .collect();
+    assert_eq!(technique_ids, ["T1059.009"]);
+
+    // The chain is the first four different actions of the rogue principal: the sign-in,
+    // the role assignment, and two API operations. They are 3, 4, and 2 seconds apart.
+    let rogue: Vec<&Event> = replay
+        .events
+        .iter()
+        .filter(|event| event.actor.id == fixtures::ROGUE_PRINCIPAL_ID)
+        .collect();
+    assert_eq!(rogue.len(), 9);
+    let actions: Vec<&str> = rogue[..4]
+        .iter()
+        .map(|event| event.action.as_str())
+        .collect();
+    assert_eq!(
+        actions,
+        [
+            action::SIGN_IN,
+            action::ROLE_ASSIGN,
+            action::API_CALL,
+            action::API_CALL
+        ]
+    );
+    let first_four: Vec<EventId> = rogue[..4].iter().map(|event| event.id).collect();
+    assert_eq!(chain.event_ids, first_four);
+    assert_eq!(chain.time, rogue[3].time);
+    assert_eq!(chain.attributes["subject"], serde_json::json!("principal"));
+    assert_eq!(chain.attributes["cadence"], serde_json::json!("short_gaps"));
+    assert_eq!(chain.attributes["distinct_actions"], serde_json::json!(4));
+    assert_eq!(
+        chain.attributes["median_gap_milliseconds"],
+        serde_json::json!(3_000)
+    );
+    assert_eq!(
+        chain.attributes["privileged_change"],
+        serde_json::json!(true)
+    );
+    assert_eq!(
+        chain.attributes["actions"],
+        serde_json::json!([
+            "sign_in",
+            "role.assign",
+            "api.call GET /users",
+            "api.call GET /servicePrincipals"
+        ])
+    );
+    let entities: Vec<(EntityKind, String)> = chain
+        .entities
+        .iter()
+        .map(|entity| (entity.kind, entity.id.clone()))
+        .collect();
+    assert_eq!(
+        entities,
+        [
+            (
+                EntityKind::ServicePrincipal,
+                fixtures::ROGUE_PRINCIPAL_ID.to_owned()
+            ),
+            (EntityKind::IpAddress, fixtures::WORKLOAD_IP.to_string()),
+            (EntityKind::IpAddress, fixtures::DISTANT_IP.to_string()),
+        ]
+    );
 }
 
 #[tokio::test]
@@ -363,7 +450,7 @@ async fn the_sign_in_burst_gives_one_detection_and_not_six_hundred() {
 #[tokio::test]
 async fn the_replay_sends_no_request_to_the_model() {
     let replay = replay().await;
-    assert_eq!(replay.detections().len(), 8);
+    assert_eq!(replay.detections().len(), 9);
     assert_eq!(replay.model.requests().len(), 0);
 }
 

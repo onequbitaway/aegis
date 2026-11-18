@@ -1,10 +1,11 @@
 //! The application: all subsystems of one AEGIS process, built from one configuration.
 
+use std::collections::BTreeMap;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use aegis_agents::{AgentRuntime, BUILT_IN_ROLES, RunReport};
@@ -13,10 +14,10 @@ use aegis_contracts::action::{
 };
 use aegis_contracts::audit::{AuditEntry, AuditKind, AuditLog};
 use aegis_contracts::bus::{MessageBus, publish_json, subject};
-use aegis_contracts::common::{ApprovalId, IncidentId, TaskId};
+use aegis_contracts::common::{ActionId, ApprovalId, IncidentId, TaskId};
 use aegis_contracts::event::Event;
 use aegis_contracts::graph::{DefensiveGraph, VectorStore};
-use aegis_contracts::incident::IncidentStore;
+use aegis_contracts::incident::{Incident, IncidentStore};
 use aegis_contracts::model::ModelProvider;
 use aegis_contracts::policy::{
     ApprovalQueue, ApprovalRequest, PolicyDecision, PolicyEffect, Principal, PrincipalKind,
@@ -24,7 +25,7 @@ use aegis_contracts::policy::{
 use aegis_contracts::source::SourceConnector;
 use aegis_contracts::{AgentContext, AgentInput, AgentRole, AgentTask, Error, Result};
 use aegis_core::{Config, Module, ModuleSet, Shutdown};
-use aegis_detect::{DetectionEngine, RulePack};
+use aegis_detect::{DetectionEngine, FloodCounters, IncidentCoalescer, RulePack};
 use aegis_ingest::{
     CheckpointStore, FileCheckpointStore, IngestStats, MemoryCheckpointStore, RunOutcome,
     SourceRegistry,
@@ -32,8 +33,10 @@ use aegis_ingest::{
 use aegis_memory::{MemoryApprovals, MemoryGraph, MemoryIncidents, MemoryVectors};
 use aegis_policy::{ApprovalService, FileAuditLog, Permission, Rbac, RegoPolicyEngine};
 use aegis_respond::{
-    ActionRegistry, Dispatcher, GraphActionConnector, HoneytokenConnector, HoneytokenRegistry,
-    HoneytokenTripDetector, MemoryHoneytokenStore, MemorySecretSink, WebhookConnector,
+    ActionRegistry, Dispatcher, FileRevertStore, GraphActionConnector, HoneytokenConnector,
+    HoneytokenRegistry, HoneytokenTripDetector, MemoryHoneytokenStore, MemorySecretSink,
+    PendingRevert, PlaybookRun, RevertScheduler, RevertSchedulerConfig, RevertStore,
+    WebhookConnector,
 };
 use chrono::Utc;
 use serde_json::json;
@@ -45,6 +48,7 @@ use crate::actions::{ActionJournal, DispatchResult, SimulationConnector};
 use crate::activity::Activity;
 use crate::audit::PublishingAuditLog;
 use crate::bridge::{AgentFeed, Bridge, DetectionBus, IngestTap, Progress};
+use crate::evidence::EvidenceArchive;
 use crate::incidents::SharedIncidents;
 use crate::offline::OfflineModel;
 use crate::playbooks::Playbooks;
@@ -124,6 +128,8 @@ pub struct AppBuilder<'a> {
     audit_file: Option<PathBuf>,
     local_session: bool,
     force_dry_run: bool,
+    #[cfg(feature = "decoy")]
+    decoy_env: crate::decoy::EnvLookup,
 }
 
 impl AppBuilder<'_> {
@@ -175,8 +181,22 @@ impl AppBuilder<'_> {
         self
     }
 
+    /// Sets the function that returns the value of an environment variable for the decoy
+    /// service: the seed and the decoy keys. The default reads the environment of the
+    /// process. Use this function in a test.
+    #[cfg(feature = "decoy")]
+    #[must_use]
+    pub fn decoy_env(
+        mut self,
+        env: impl Fn(&str) -> Option<String> + Send + Sync + 'static,
+    ) -> Self {
+        self.decoy_env = Arc::new(env);
+        self
+    }
+
     /// Ignores the `[[sources]]` of the configuration. Only the sources of
-    /// [`AppBuilder::source`] and of the plugins remain.
+    /// [`AppBuilder::source`] and of the plugins remain. The decoy service of the
+    /// `[decoy]` section is also a configured source, so it does not start.
     #[must_use]
     pub fn without_configured_sources(mut self) -> Self {
         self.use_configured_sources = false;
@@ -241,6 +261,10 @@ impl AppBuilder<'_> {
         };
         if !self.use_configured_sources {
             settings.sources.clear();
+            #[cfg(feature = "decoy")]
+            {
+                settings.decoy = None;
+            }
         }
         if self.force_dry_run {
             settings.response.dry_run = true;
@@ -253,8 +277,19 @@ impl AppBuilder<'_> {
             settings.bus.kind = aegis_bus::BusKind::Memory;
             settings.storage = StorageSettings::Memory;
             settings.ingest.checkpoint_dir = None;
+            // A local session opens no listener of the configuration.
+            #[cfg(feature = "decoy")]
+            {
+                settings.decoy = None;
+            }
         }
         if let Some(audit_file) = self.audit_file {
+            // A second application on a host must not share the files of the service. One
+            // scheduler uses one revert store, so this application has no revert store:
+            // it refuses an action with a revert time that is not a dry run. The evidence
+            // archive also has one writer, so this application has no archive.
+            settings.response.revert = None;
+            settings.evidence = None;
             settings.audit = AuditSettings::File(aegis_policy::FileAuditLogConfig {
                 path: if audit_file.is_absolute() {
                     audit_file
@@ -263,7 +298,13 @@ impl AppBuilder<'_> {
                 },
             });
         }
-        App::assemble(settings, self.model, self.action_connectors, self.sources).await
+        let app = App::assemble(settings, self.model, self.action_connectors, self.sources).await?;
+        #[cfg(feature = "decoy")]
+        let app = App {
+            decoy: crate::decoy::DecoyRuntime::new(self.decoy_env),
+            ..app
+        };
+        Ok(app)
     }
 }
 
@@ -310,6 +351,10 @@ pub struct App {
     approval_service: Arc<ApprovalService>,
     action_registry: Arc<ActionRegistry>,
     dispatcher: Arc<Dispatcher>,
+    /// The scheduler of the timed reverts. `None` if the timed revert is off.
+    reverts: Option<RevertScheduler>,
+    /// The evidence archive. `None` if the archive is off.
+    evidence: Option<Arc<EvidenceArchive>>,
     actions: Arc<ActionJournal>,
     playbooks: Arc<Playbooks>,
     engine: Arc<DetectionEngine>,
@@ -323,8 +368,23 @@ pub struct App {
     exclusive: tokio::sync::Mutex<()>,
     service_runs: AtomicBool,
     start_recorded: AtomicBool,
+    /// The incident states that [`App::replay`] did not use, because a newer state of the
+    /// same incident replaced them.
+    replay_coalesced: AtomicU64,
+    /// The decoy service: its secrets, and its handle while the service runs.
+    #[cfg(feature = "decoy")]
+    decoy: crate::decoy::DecoyRuntime,
     #[cfg(feature = "postgres")]
     postgres: Option<aegis_storage::PgStore>,
+}
+
+/// The work of one replay on its incidents.
+#[derive(Default)]
+struct ReplayWork {
+    /// The incidents that changed, in the order of their first change.
+    touched: Vec<IncidentId>,
+    playbook_runs: Vec<PlaybookRun>,
+    agents: RunReport,
 }
 
 /// The state after the approval service recorded the decision of a person.
@@ -351,6 +411,14 @@ impl Drop for ServiceFlag<'_> {
 /// How one component of a service run ended.
 enum TaskEnd {
     Ingest {
+        name: String,
+        result: Result<RunOutcome>,
+        stats: IngestStats,
+    },
+    /// The ingestion runner of the decoy service. The decoy is a live source that has no
+    /// end, so it is not one of the sources that a session on recorded events waits for.
+    #[cfg(feature = "decoy")]
+    Decoy {
         name: String,
         result: Result<RunOutcome>,
         stats: IngestStats,
@@ -423,6 +491,8 @@ impl App {
             audit_file: None,
             local_session: false,
             force_dry_run: false,
+            #[cfg(feature = "decoy")]
+            decoy_env: crate::decoy::process_env(),
         }
     }
 
@@ -456,6 +526,14 @@ impl App {
         let honeytokens =
             Arc::new(HoneytokenRegistry::open(Arc::new(MemoryHoneytokenStore::default())).await?);
         let plugins = Self::plugins(&settings).await?;
+        // Each decoy key of the decoy service is a honeytoken with the identifier of the
+        // key. Thus the honeytoken detector and the decoy agree on each key.
+        #[cfg(feature = "decoy")]
+        if let Some(decoy) = &settings.decoy {
+            crate::decoy::register_keys(&honeytokens, decoy)
+                .await
+                .map_err(|error| section_error(crate::settings::DECOY_SECTION, error))?;
+        }
 
         // Detection: the rule pack, tier 2 if the process has a model, and the detector
         // for the honeytokens of the registry.
@@ -480,8 +558,30 @@ impl App {
         // weak reference: the playbook set holds the dispatcher, and the dispatcher holds
         // the incident store.
         let playbook_cell: Arc<std::sync::OnceLock<std::sync::Weak<Playbooks>>> = Arc::default();
+        // The evidence archive: each detection with its events, and each state of an
+        // incident. The sharing commands read it.
+        let evidence = match &settings.evidence {
+            Some(evidence) => {
+                let (path, max_bytes) = (evidence.path.clone(), evidence.max_bytes);
+                let archive =
+                    tokio::task::spawn_blocking(move || EvidenceArchive::open(path, max_bytes))
+                        .await
+                        .map_err(|error| Error::other("open the evidence archive", error))?
+                        .map_err(|error| section_error(crate::settings::EVIDENCE_SECTION, error))?;
+                Some(Arc::new(archive))
+            }
+            None => None,
+        };
         let incidents = Arc::new(
             SharedIncidents::new(stores.incidents.clone(), activity.clone())
+                .on_written({
+                    let evidence = evidence.clone();
+                    move |incident| {
+                        if let Some(archive) = &evidence {
+                            archive.record_incident(incident);
+                        }
+                    }
+                })
                 .on_closed({
                     let engine = engine.clone();
                     move |id| {
@@ -519,22 +619,44 @@ impl App {
             &rotated_secrets,
         )?);
         let shared_incidents: Arc<dyn IncidentStore> = incidents.clone();
-        let dispatcher = Arc::new(
-            Dispatcher::builder(
-                action_registry.clone(),
-                policy.clone(),
-                stores.approvals.clone(),
-                audit_log.clone(),
-            )
-            .incidents(shared_incidents.clone())
-            .bus(bus.clone())
-            .environment(settings.response.environment.clone())
-            .dry_run(settings.response.dry_run)
-            .execution_timeout(Duration::from_secs(
-                settings.response.execution_timeout_seconds,
-            ))
-            .build(),
-        );
+        let mut dispatcher = Dispatcher::builder(
+            action_registry.clone(),
+            policy.clone(),
+            stores.approvals.clone(),
+            audit_log.clone(),
+        )
+        .incidents(shared_incidents.clone())
+        .bus(bus.clone())
+        .environment(settings.response.environment.clone())
+        .dry_run(settings.response.dry_run)
+        .execution_timeout(Duration::from_secs(
+            settings.response.execution_timeout_seconds,
+        ));
+        // The timed revert: the dispatcher keeps each pending revert in a file, so that a
+        // restart does not lose it. A file that is not readable stops the build.
+        if let Some(revert) = &settings.response.revert {
+            let store: Arc<dyn RevertStore> = Arc::new(
+                FileRevertStore::open(revert.store.clone())
+                    .await
+                    .map_err(|error| section_error("response", error))?,
+            );
+            dispatcher = dispatcher.revert_store(store);
+        }
+        let dispatcher = Arc::new(dispatcher.build());
+        let reverts = match &settings.response.revert {
+            Some(revert) => Some(
+                RevertScheduler::with_config(
+                    dispatcher.clone(),
+                    RevertSchedulerConfig {
+                        retry_base: Duration::from_secs(revert.retry_base_seconds),
+                        retry_max: Duration::from_secs(revert.retry_max_seconds),
+                        approval_poll: Duration::from_secs(revert.approval_poll_seconds),
+                    },
+                )
+                .map_err(|error| section_error("response", error))?,
+            ),
+            None => None,
+        };
         let actions = Arc::new(ActionJournal::new(dispatcher.clone(), activity.clone()));
         let action_dispatcher: Arc<dyn ActionDispatcher> = actions.clone();
 
@@ -583,16 +705,19 @@ impl App {
 
         let playbooks_enabled = settings.modules.contains(Module::Responder)
             && settings.response.playbooks != PlaybookMode::Off;
-        let bridge = Arc::new(Bridge::new(
-            bus.clone(),
-            audit_log,
-            incidents.clone(),
-            agents.clone(),
-            playbooks.clone(),
-            playbooks_enabled,
-            settings.agents.monitor_events,
-            activity.clone(),
-        ));
+        let bridge = Arc::new(
+            Bridge::new(
+                bus.clone(),
+                audit_log,
+                incidents.clone(),
+                agents.clone(),
+                playbooks.clone(),
+                playbooks_enabled,
+                settings.agents.monitor_events,
+                activity.clone(),
+            )
+            .with_evidence(evidence.clone()),
+        );
 
         Ok(Self {
             settings,
@@ -610,6 +735,8 @@ impl App {
             approval_service,
             action_registry,
             dispatcher,
+            reverts,
+            evidence,
             actions,
             playbooks,
             engine,
@@ -622,6 +749,9 @@ impl App {
             exclusive: tokio::sync::Mutex::new(()),
             service_runs: AtomicBool::new(false),
             start_recorded: AtomicBool::new(false),
+            replay_coalesced: AtomicU64::new(0),
+            #[cfg(feature = "decoy")]
+            decoy: crate::decoy::DecoyRuntime::new(crate::decoy::process_env()),
             #[cfg(feature = "postgres")]
             postgres: stores.postgres,
         })
@@ -878,6 +1008,24 @@ impl App {
         self.dispatcher.clone()
     }
 
+    /// Returns the scheduler of the timed reverts. `None` means that the timed revert is
+    /// off: the configuration has no `[response.revert]` table.
+    ///
+    /// [`App::run_with`] runs the scheduler. Use [`App::confirm_revert`],
+    /// [`App::extend_revert`], and [`App::cancel_revert`] for the decisions of a person:
+    /// they check the permission of the principal.
+    #[must_use]
+    pub fn revert_scheduler(&self) -> Option<RevertScheduler> {
+        self.reverts.clone()
+    }
+
+    /// Returns the evidence archive. `None` means that the archive is off: the
+    /// configuration has no `[evidence]` section.
+    #[must_use]
+    pub fn evidence(&self) -> Option<Arc<EvidenceArchive>> {
+        self.evidence.clone()
+    }
+
     /// Returns the dispatcher with its journal. Send each new action request to this
     /// value, so that the journal has the request.
     #[must_use]
@@ -941,6 +1089,101 @@ impl App {
     #[must_use]
     pub fn progress(&self) -> Progress {
         self.bridge.progress()
+    }
+
+    /// Returns the counts of the flood protection of the detection engine, from the start
+    /// of the process.
+    ///
+    /// `coalesced_incident_updates` also counts the incident states that [`App::replay`]
+    /// did not use.
+    #[must_use]
+    pub fn flood_counters(&self) -> FloodCounters {
+        let mut counters = self.engine.flood_counters();
+        counters.coalesced_incident_updates = counters
+            .coalesced_incident_updates
+            .saturating_add(self.replay_coalesced.load(Ordering::Relaxed));
+        counters
+    }
+
+    /// Returns the fields that the status route of the operator API adds to its
+    /// document: the timed reverts, the evidence archive, and the decoy service.
+    pub async fn status_sections(&self) -> BTreeMap<String, serde_json::Value> {
+        let mut sections = BTreeMap::new();
+        let reverts = match &self.reverts {
+            Some(scheduler) => {
+                let stats = scheduler.stats();
+                // A store that does not answer gives no count. The status route still
+                // answers.
+                let pending = scheduler.pending().await.ok().map(|pending| pending.len());
+                json!({
+                    "enabled": true,
+                    "pending": pending,
+                    "reverted": stats.reverted,
+                    "failed_attempts": stats.failed_attempts,
+                    "confirmed": stats.confirmed,
+                    "extended": stats.extended,
+                    "cancelled": stats.cancelled,
+                    "closed": stats.closed,
+                })
+            }
+            None => json!({ "enabled": false }),
+        };
+        sections.insert("reverts".to_owned(), reverts);
+        let evidence = match &self.evidence {
+            Some(archive) => {
+                let stats = archive.stats();
+                json!({
+                    "enabled": true,
+                    "records_written": stats.records_written,
+                    "bytes_written": stats.bytes_written,
+                    "records_dropped": stats.records_dropped,
+                    "rotations": stats.rotations,
+                })
+            }
+            None => json!({ "enabled": false }),
+        };
+        sections.insert("evidence".to_owned(), evidence);
+        #[cfg(feature = "decoy")]
+        if let Some(config) = &self.settings.decoy {
+            sections.insert("decoy".to_owned(), self.decoy.status(config));
+        }
+        sections
+    }
+
+    /// Returns the address on which the decoy service listens. `None` means that the
+    /// decoy does not run: the configuration has no `[decoy]` section, the module `ingest`
+    /// is not in the module set, or the service does not run.
+    #[cfg(feature = "decoy")]
+    #[must_use]
+    pub fn decoy_address(&self) -> Option<std::net::SocketAddr> {
+        self.decoy.address()
+    }
+
+    /// Checks the `[decoy]` section with its secrets: the seed and the decoy keys. Opens
+    /// no socket. The function does nothing if the configuration has no decoy.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Config`] if an environment variable that the section names is not
+    /// set, or if its value is not usable. The message names the section and the
+    /// variable. It never shows a secret.
+    #[cfg(feature = "decoy")]
+    pub fn check_decoy(&self) -> Result<()> {
+        match &self.settings.decoy {
+            Some(config) => self
+                .decoy
+                .check(config)
+                .map_err(|error| section_error(crate::settings::DECOY_SECTION, error)),
+            None => Ok(()),
+        }
+    }
+
+    /// Returns `true` if [`App::run_with`] starts the decoy service: the configuration has
+    /// the `[decoy]` section, and the module `ingest` is in the module set.
+    #[cfg(feature = "decoy")]
+    #[must_use]
+    pub fn runs_decoy(&self) -> bool {
+        self.settings.decoy.is_some() && self.settings.modules.contains(Module::Ingest)
     }
 
     /// Waits until `condition` returns `true`, for `limit` at most.
@@ -1010,6 +1253,9 @@ impl App {
             "model": self.has_model,
             "connectors": self.action_registry.names(),
             "sources": self.sources.names(),
+            "timed_revert": self.reverts.is_some(),
+            "evidence_archive": self.evidence.is_some(),
+            "decoy": self.decoy_name(),
         }));
         match self.audit.append(entry).await {
             Ok(_) => Ok(()),
@@ -1018,6 +1264,15 @@ impl App {
                 Err(error)
             }
         }
+    }
+
+    /// Returns the name of the decoy service that a service run starts.
+    fn decoy_name(&self) -> Option<&str> {
+        #[cfg(feature = "decoy")]
+        if self.runs_decoy() {
+            return self.settings.decoy.as_ref().map(|decoy| decoy.id.as_str());
+        }
+        None
     }
 
     /// Runs the agent runtime until its queue is empty. Adds the counts to `total`.
@@ -1063,53 +1318,45 @@ impl App {
         let journal_mark = self.actions.total();
         let mut count = 0_u64;
         let mut detections = Vec::new();
-        let mut touched: Vec<IncidentId> = Vec::new();
-        let mut playbook_runs = Vec::new();
-        let mut agent_report = RunReport::default();
+        let mut work = ReplayWork::default();
+        // The limit on the states of one incident that the service has. Refer to
+        // `detection.runner.max_incident_updates`. A flood of detections for one incident
+        // thus gives a limited number of agent tasks and audit records.
+        let runner = &self.settings.detection.runner;
+        let mut coalescer = IncidentCoalescer::new(
+            runner.max_incident_updates,
+            runner.incident_update_window_seconds,
+        )
+        .map_err(|error| section_error("detection", error.into()))?;
 
         for event in events {
             count += 1;
             self.bridge.observe_event(&event);
             let output = self.engine.process(&event).await?;
-            let mut nudges = Vec::new();
-            let mut for_playbooks = Vec::new();
             for detection in &output.detections {
                 self.bridge.on_detection(detection).await?;
                 self.bridge.publish_detection(detection).await?;
-                detections.push(detection.clone());
             }
-            for incident in &output.incidents {
-                let update = self
-                    .bridge
-                    .on_engine_incident(incident, AgentFeed::Direct)
-                    .await?;
-                if update.merge.changed && !touched.contains(&incident.id) {
-                    touched.push(incident.id);
-                }
-                if update.analyst_nudge {
-                    nudges.push(update.merge.incident);
-                }
-                if update.playbooks {
-                    for_playbooks.push(incident.id);
-                }
+            detections.extend(output.detections);
+            // The new states go first. A new state replaces a held state of its incident.
+            let mut states = Vec::with_capacity(output.incidents.len());
+            for incident in output.incidents {
+                states.extend(coalescer.offer(incident, event.time));
             }
-            // The Monitor writes the new data to the graph first. Then the Analyst gets an
-            // incident that an agent moved past `open` before.
-            self.drive_agents(&mut agent_report).await?;
-            if !nudges.is_empty() {
-                for incident in &nudges {
-                    self.bridge.nudge_analyst(incident)?;
-                }
-                self.drive_agents(&mut agent_report).await?;
-            }
-            for incident_id in for_playbooks {
-                playbook_runs.extend(self.bridge.run_playbooks(incident_id).await?);
-            }
+            states.extend(coalescer.release_due(event.time));
+            self.replay_states(&states, &mut work).await?;
         }
-        self.drive_agents(&mut agent_report).await?;
+        // The stream of events stopped. A held state is the newest state of its incident.
+        let held = coalescer.flush();
+        self.replay_coalesced
+            .fetch_add(coalescer.coalesced(), Ordering::Relaxed);
+        if !held.is_empty() {
+            self.replay_states(&held, &mut work).await?;
+        }
+        self.drive_agents(&mut work.agents).await?;
 
-        let mut incidents = Vec::with_capacity(touched.len());
-        for id in touched {
+        let mut incidents = Vec::with_capacity(work.touched.len());
+        for id in work.touched {
             if let Some(incident) = self.incidents.get(id).await? {
                 incidents.push(incident);
             }
@@ -1122,13 +1369,49 @@ impl App {
             detections,
             incidents,
             actions: self.actions.since(journal_mark),
-            playbook_runs,
-            agents: self.agents.as_ref().map(|_| agent_report),
+            playbook_runs: work.playbook_runs,
+            agents: self.agents.as_ref().map(|_| work.agents),
             audit: AuditSummary {
                 records: verification.checked,
                 verification,
             },
         })
+    }
+
+    /// Takes the incident states of one step of a replay: the store, the agents, and the
+    /// playbooks.
+    async fn replay_states(&self, states: &[Incident], work: &mut ReplayWork) -> Result<()> {
+        let mut nudges = Vec::new();
+        let mut for_playbooks = Vec::new();
+        for incident in states {
+            let update = self
+                .bridge
+                .on_engine_incident(incident, AgentFeed::Direct)
+                .await?;
+            if update.merge.changed && !work.touched.contains(&incident.id) {
+                work.touched.push(incident.id);
+            }
+            if update.analyst_nudge {
+                nudges.push(update.merge.incident);
+            }
+            if update.playbooks {
+                for_playbooks.push(incident.id);
+            }
+        }
+        // The Monitor writes the new data to the graph first. Then the Analyst gets an
+        // incident that an agent moved past `open` before.
+        self.drive_agents(&mut work.agents).await?;
+        if !nudges.is_empty() {
+            for incident in &nudges {
+                self.bridge.nudge_analyst(incident)?;
+            }
+            self.drive_agents(&mut work.agents).await?;
+        }
+        for incident_id in for_playbooks {
+            work.playbook_runs
+                .extend(self.bridge.run_playbooks(incident_id).await?);
+        }
+        Ok(())
     }
 
     /// Runs the service until `shutdown` is triggered.
@@ -1150,14 +1433,16 @@ impl App {
     ///
     /// | Module | Component |
     /// | --- | --- |
-    /// | `ingest` | One ingestion runner for each source. |
+    /// | `ingest` | One ingestion runner for each source. The decoy service, if the configuration has the `[decoy]` section. |
     /// | `detection` | The bus runner of the detection engine, with the bridges. |
     /// | An agent module | The agent runtime. It reads incidents and tasks from the bus. |
     /// | `responder` | The playbook worker, if `response.playbooks` is not `off`. |
     /// | `api` | The service of `options` for the module `api`: the operator API. |
     ///
-    /// It also starts the other services of `options`. After the shutdown signal, each
-    /// component completes the work that is in progress, and the function returns.
+    /// It also starts the revert scheduler, if the configuration has the
+    /// `[response.revert]` table, and the other services of `options`. After the shutdown
+    /// signal, each component completes the work that is in progress, and the function
+    /// returns.
     ///
     /// # Errors
     ///
@@ -1202,6 +1487,16 @@ impl App {
                 TaskEnd::Helper
             }
         });
+
+        // The revert scheduler reads the pending reverts of the store when it starts.
+        // Thus it continues the timed reverts from before a restart.
+        if let Some(scheduler) = &self.reverts {
+            let (scheduler, stop) = (scheduler.clone(), stop.clone());
+            tasks.spawn(async move {
+                scheduler.run(async move { stop.wait().await }).await;
+                TaskEnd::Helper
+            });
+        }
 
         let detection_runs = modules.contains(Module::Detection);
         if detection_runs {
@@ -1253,6 +1548,46 @@ impl App {
         if modules.contains(Module::Ingest) {
             let tap: Arc<dyn MessageBus> =
                 Arc::new(IngestTap::new(self.bus.clone(), self.bridge.clone()));
+            // The decoy service: a listener for clients that have no permission, and one
+            // ingestion runner for its events.
+            #[cfg(feature = "decoy")]
+            if let Some(config) = &self.settings.decoy {
+                let started = match self.decoy.bind(config).await {
+                    Ok(bound) => aegis_ingest::IngestRunner::new(
+                        Arc::new(bound.service()),
+                        tap.clone(),
+                        self.checkpoints.clone(),
+                        // The runner has a signal of its own. Thus it publishes the last
+                        // events of the decoy, and it completes when the stream ends.
+                        CancellationToken::new(),
+                    )
+                    .map(|runner| (bound, runner.with_retry(self.settings.ingest.retry))),
+                    Err(error) => Err(error),
+                };
+                let (bound, runner) = match started {
+                    Ok(started) => started,
+                    Err(error) => {
+                        self.decoy.stopped();
+                        stop.trigger();
+                        while tasks.join_next().await.is_some() {}
+                        return Err(section_error(crate::settings::DECOY_SECTION, error));
+                    }
+                };
+                self.activity.bump();
+                let token = cancel.clone();
+                tasks.spawn(async move {
+                    bound.serve(token).await;
+                    TaskEnd::Helper
+                });
+                tasks.spawn(async move {
+                    let result = runner.run().await;
+                    TaskEnd::Decoy {
+                        name: runner.name().to_owned(),
+                        result,
+                        stats: runner.stats(),
+                    }
+                });
+            }
             let runners =
                 self.sources
                     .runners(&tap, &self.checkpoints, &cancel, self.settings.ingest.retry);
@@ -1355,6 +1690,22 @@ impl App {
                         } else {
                             stop.trigger();
                         }
+                    }
+                }
+                #[cfg(feature = "decoy")]
+                TaskEnd::Decoy {
+                    name,
+                    result,
+                    stats,
+                } => {
+                    self.decoy.stopped();
+                    match result {
+                        Ok(outcome) => summary.sources.push(SourceSummary {
+                            name,
+                            outcome,
+                            stats,
+                        }),
+                        Err(error) => fail(error, "decoy", &stop),
                     }
                 }
                 TaskEnd::Detection(Ok(_)) | TaskEnd::Helper => {}
@@ -1544,6 +1895,122 @@ impl App {
             runtime.run_until_idle().await?;
         }
         Ok(())
+    }
+
+    /// Returns the scheduler of the timed reverts, or the error for a process in which
+    /// the timed revert is off.
+    fn timed_reverts(&self) -> Result<&RevertScheduler> {
+        self.reverts.as_ref().ok_or_else(|| {
+            Error::Unsupported(
+                "the timed revert is off: the configuration has no `[response.revert]` table"
+                    .to_owned(),
+            )
+        })
+    }
+
+    /// Lists the timed reverts that wait for their time or for a person. The revert with
+    /// the earliest time is first.
+    ///
+    /// The list is empty if the timed revert is off.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error of the revert store.
+    pub async fn pending_reverts(&self) -> Result<Vec<PendingRevert>> {
+        match &self.reverts {
+            Some(scheduler) => scheduler.pending().await,
+            None => Ok(Vec::new()),
+        }
+    }
+
+    /// Confirms an action that has a timed revert. The containment stays.
+    ///
+    /// The scheduler writes an audit record with the principal before it removes the
+    /// pending revert.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::Unauthorized`] if `principal` does not have the permission
+    ///   `approve_actions`, or is not a person.
+    /// - [`Error::NotFound`] if the action has no pending revert.
+    /// - [`Error::Unsupported`] if the timed revert is off.
+    pub async fn confirm_revert(
+        &self,
+        action_id: ActionId,
+        principal: &Principal,
+    ) -> Result<PendingRevert> {
+        self.rbac.check(principal, Permission::ApproveActions)?;
+        self.timed_reverts()?.confirm(action_id, principal).await
+    }
+
+    /// Moves the revert time of an action by `extension`.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::Unauthorized`] if `principal` does not have the permission
+    ///   `approve_actions`, or is not a person.
+    /// - [`Error::InvalidInput`] if `extension` is less than one second, or the new time
+    ///   is more than 30 days from the present time.
+    /// - [`Error::NotFound`] if the action has no pending revert.
+    /// - [`Error::Unsupported`] if the timed revert is off.
+    pub async fn extend_revert(
+        &self,
+        action_id: ActionId,
+        principal: &Principal,
+        extension: Duration,
+    ) -> Result<PendingRevert> {
+        self.rbac.check(principal, Permission::ApproveActions)?;
+        self.timed_reverts()?
+            .extend(action_id, principal, extension)
+            .await
+    }
+
+    /// Reverts an action with a timed revert immediately, before its revert time.
+    ///
+    /// The revert is a request of its own. It goes through the policy, the approval
+    /// queue, and the audit log, with `principal`. If the result is not a completed
+    /// revert, the pending revert stays.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::Unauthorized`] if `principal` does not have the permission
+    ///   `approve_actions`.
+    /// - [`Error::NotFound`] if the action has no pending revert.
+    /// - [`Error::Unsupported`] if the timed revert is off.
+    /// - The errors of [`Dispatcher::revert`].
+    pub async fn cancel_revert(
+        &self,
+        action_id: ActionId,
+        principal: &Principal,
+    ) -> Result<ActionDisposition> {
+        self.rbac.check(principal, Permission::ApproveActions)?;
+        let disposition = self.timed_reverts()?.cancel(action_id, principal).await?;
+        self.activity.bump();
+        Ok(disposition)
+    }
+
+    /// Reverts one action that a connector did before, with or without a timed revert.
+    ///
+    /// The revert is a request of its own. It goes through the policy, the approval
+    /// queue, and the audit log, with `principal`. Refer to [`Dispatcher::revert`].
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::Unauthorized`] if `principal` does not have the permission
+    ///   `approve_actions`.
+    /// - The errors of [`Dispatcher::revert`]: for example [`Error::NotFound`] if the
+    ///   audit log has no execution of the action, and [`Error::InvalidInput`] if the
+    ///   action was a dry run or was reverted before.
+    pub async fn revert_action(
+        &self,
+        action_id: ActionId,
+        principal: &Principal,
+        reason: &str,
+    ) -> Result<ActionDisposition> {
+        self.rbac.check(principal, Permission::ApproveActions)?;
+        let disposition = self.dispatcher.revert(action_id, principal, reason).await?;
+        self.activity.bump();
+        Ok(disposition)
     }
 
     /// Loads the rule pack, the policy, and the playbooks again from their files.

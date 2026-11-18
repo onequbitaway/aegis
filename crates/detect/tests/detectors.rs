@@ -11,7 +11,8 @@ use aegis_detect::ioc::{Indicator, IndicatorKind, IocStore};
 use aegis_detect::sigma::{SigmaDetector, SigmaRule};
 use aegis_detect::velocity::{
     CredentialAfterGrant, CredentialAfterGrantConfig, ImpossibleSpeed, ImpossibleSpeedConfig,
-    PrivilegedSelfAssignment, PrivilegedSelfAssignmentConfig, SignInBurst, SignInBurstConfig,
+    MachineCadence, MachineCadenceConfig, PrivilegedSelfAssignment, PrivilegedSelfAssignmentConfig,
+    SignInBurst, SignInBurstConfig,
 };
 use aegis_testkit::fixtures::{self, expected};
 use chrono::TimeDelta;
@@ -83,6 +84,10 @@ async fn the_indicator_store_finds_the_events_from_an_indicator_address() {
         tags: vec!["attack.t1078.004".to_owned()],
         verdict: None,
         id: Some("test-indicator".to_owned()),
+        first_seen: None,
+        last_seen: None,
+        source: None,
+        suppress_seconds: None,
     };
     let detector: Arc<dyn Detector> = Arc::new(IocStore::new(vec![indicator]).unwrap());
     assert_eq!(detector.id(), "aegis.ioc");
@@ -248,4 +253,78 @@ async fn a_speed_detector_with_no_cooldown_finds_each_change_of_place() {
             .iter()
             .all(|found| found.entities[0].id == fixtures::ROGUE_PRINCIPAL_ID)
     );
+}
+
+#[tokio::test]
+async fn the_cadence_detector_finds_the_chain_of_the_rogue_principal() {
+    let detector: Arc<dyn Detector> =
+        Arc::new(MachineCadence::new(MachineCadenceConfig::default()).unwrap());
+    assert_eq!(detector.id(), "aegis.velocity.machine_cadence");
+    assert_eq!(detector.tier(), DetectionTier::Deterministic);
+
+    let detections = replay(detector).await;
+    assert_eq!(detections.len(), 1);
+    let found = &detections[0];
+    assert_eq!(technique_ids(found), ["T1059.009"]);
+    assert_eq!(found.verdict, Verdict::Malicious);
+    assert_eq!(found.severity, Severity::High);
+    // The fourth different action of the rogue principal is its second API call.
+    assert_eq!(found.time, at(652_000));
+    assert_eq!(found.entities[0].id, fixtures::ROGUE_PRINCIPAL_ID);
+    assert_eq!(found.event_ids.len(), 4);
+}
+
+#[tokio::test]
+async fn a_cadence_detector_for_three_actions_also_finds_the_chain_of_the_victim_account() {
+    let config = MachineCadenceConfig {
+        min_actions: 3,
+        ..MachineCadenceConfig::default()
+    };
+    let detector: Arc<dyn Detector> = Arc::new(MachineCadence::new(config).unwrap());
+    let detections = replay(detector).await;
+    // The victim account signs in, consents, and adds a credential in nine seconds. The
+    // rogue principal then completes a chain of three actions with its first API call.
+    let found: Vec<(&str, chrono::DateTime<chrono::Utc>)> = detections
+        .iter()
+        .map(|detection| (detection.entities[0].id.as_str(), detection.time))
+        .collect();
+    assert_eq!(
+        found,
+        [
+            (fixtures::VICTIM_USER_ID, at(640_000)),
+            (fixtures::ROGUE_PRINCIPAL_ID, at(650_000)),
+        ]
+    );
+    // The consent is privileged, and so is the role assignment.
+    assert!(
+        detections
+            .iter()
+            .all(|detection| detection.verdict == Verdict::Malicious)
+    );
+    let victim_events: Vec<Event> = fixtures::artex_style_attack()
+        .into_iter()
+        .filter(|event| {
+            event.actor.id == fixtures::VICTIM_USER_ID
+                && event.outcome != aegis_contracts::event::Outcome::Failure
+        })
+        .collect();
+    assert_eq!(victim_events.len(), 3);
+    assert_eq!(
+        detections[0].event_ids,
+        victim_events
+            .iter()
+            .map(|event| event.id)
+            .collect::<Vec<_>>()
+    );
+}
+
+#[tokio::test]
+async fn a_cadence_detector_with_a_limit_of_one_second_finds_no_chain() {
+    // The gaps of the rogue principal are 2 to 4 seconds.
+    let config = MachineCadenceConfig {
+        max_median_gap_milliseconds: 1_000,
+        ..MachineCadenceConfig::default()
+    };
+    let detector: Arc<dyn Detector> = Arc::new(MachineCadence::new(config).unwrap());
+    assert_eq!(replay(detector).await, []);
 }

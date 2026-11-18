@@ -307,12 +307,12 @@ async fn a_replay_and_a_service_run_with_postgres_and_nats() {
     // --- The replay.
     let report = app.replay(fixtures::artex_style_attack()).await.unwrap();
 
-    assert_eq!(report.detections.len(), 8);
+    assert_eq!(report.detections.len(), 9);
     assert_eq!(report.incidents.len(), 1);
     let incident = &report.incidents[0];
     assert_eq!(incident.severity, Severity::Critical);
     assert_eq!(incident.status, IncidentStatus::Investigating);
-    assert_eq!(incident.detections.len(), 8);
+    assert_eq!(incident.detections.len(), 9);
     assert_eq!(report.actions.len(), 23);
     for action in &report.actions {
         assert!(
@@ -338,12 +338,33 @@ async fn a_replay_and_a_service_run_with_postgres_and_nats() {
     assert_eq!(verification.checked, report.audit.records);
     let records: Vec<AuditRecord> = reader.audit().read(1, 100_000).await.unwrap();
     let count = |kind: AuditKind| records.iter().filter(|record| record.kind == kind).count();
-    assert_eq!(count(AuditKind::Detection), 8);
+    assert_eq!(count(AuditKind::Detection), 9);
     assert_eq!(count(AuditKind::ActionProposed), 23);
     assert_eq!(count(AuditKind::ActionExecuted), 23);
     // The Defensive Graph is in the database too.
     let nodes = reader.graph().node_count().await.unwrap();
     assert!(nodes >= 8, "{nodes}");
+
+    // The sharing functions read the incident from the incident store and the audit
+    // records from the audit table. The log records come from the evidence archive.
+    let mut share = app.settings().clone();
+    share.share.addresses.operator_networks = vec!["198.51.100.0/24".parse().unwrap()];
+    share.share.addresses.permit_documentation_ranges = true;
+    let bundle = aegis_app::sharing::abuse_report(&share, incident.id, chrono::Utc::now())
+        .await
+        .unwrap();
+    assert_eq!(
+        bundle.evidence.incident_source,
+        Some(aegis_app::sharing::IncidentSource::IncidentStore)
+    );
+    assert_eq!(bundle.evidence.detections, 9);
+    assert_eq!(bundle.evidence.events, 18);
+    assert_eq!(bundle.evidence.detections_not_in_archive, 0);
+    assert_eq!(bundle.evidence.audit_records, 9);
+    assert_eq!(bundle.evidence.audit_records_checked, report.audit.records);
+    assert_eq!(bundle.package.reports.len(), 3);
+    let indicators = aegis_app::sharing::indicators(&share, None).await.unwrap();
+    assert_eq!(indicators.shared.indicators.len(), 4);
 
     // The NATS stream has each state of the incident and each audit record.
     let bus = app.bus();
@@ -361,7 +382,7 @@ async fn a_replay_and_a_service_run_with_postgres_and_nats() {
         states.push(message.decode::<Incident>().unwrap());
     }
     assert_eq!(states[0].status, IncidentStatus::Open);
-    assert_eq!(states[6].detections.len(), 8);
+    assert_eq!(states[6].detections.len(), 9);
     assert_eq!(states[6].status, IncidentStatus::Investigating);
     drop(incidents);
     let mut audit = bus
@@ -405,7 +426,7 @@ async fn a_replay_and_a_service_run_with_postgres_and_nats() {
         summary.progress.events_processed,
         fixtures::ATTACK_LOG_EVENTS as u64
     );
-    assert_eq!(summary.progress.detections, 8);
+    assert_eq!(summary.progress.detections, 9);
     assert_eq!(reader.incidents().list(None, 10).await.unwrap().len(), 1);
     assert!(reader.audit().verify().await.unwrap().valid);
 

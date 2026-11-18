@@ -23,7 +23,8 @@ pub const HONEYTOKEN_DETECTOR_ID: &str = "aegis.deception.honeytoken_trip";
 /// [`Severity::Critical`] if the event holds the decoy value: the attacker then uses data
 /// that it took from the decoy.
 ///
-/// The detection names the actor and the source address as entities. It does not name the
+/// The detection names the actor and the source address as entities. If the actor is the
+/// source address, the detection names it one time. It does not name the
 /// decoy as an entity, so a playbook does not act on the decoy. The attributes of the
 /// detection name the honeytoken and its placement. They never hold the decoy value.
 pub struct HoneytokenTripDetector {
@@ -68,7 +69,11 @@ fn detection(trip: &Trip, event: &Event) -> Detection {
     };
     let mut entities = vec![actor.clone()];
     if let Some(ip) = event.actor.ip {
-        entities.push(EntityRef::new(EntityKind::IpAddress, ip.to_string()));
+        let address = ip.to_string();
+        // The actor of a decoy event is the address of the client. Name it one time.
+        if actor.kind != EntityKind::IpAddress || actor.id != address {
+            entities.push(EntityRef::new(EntityKind::IpAddress, address));
+        }
     }
     let mut attributes = BTreeMap::new();
     attributes.insert(attr::HONEYTOKEN_ID.to_owned(), json!(trip.token.id));

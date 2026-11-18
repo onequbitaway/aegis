@@ -20,6 +20,9 @@ use chrono::TimeDelta;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
+/// Command and Scripting Interpreter, Cloud API: the chain of actions at machine speed.
+const CLOUD_API: &str = "T1059.009";
+
 async fn attack_package() -> (AbuseReportPackage, Vec<Event>) {
     let (incident, events) = support::attack_incident().await;
     let audit = support::audit_chain(&incident);
@@ -258,7 +261,8 @@ async fn each_report_gives_the_attack_techniques_of_its_detections() {
             .map(|technique| technique.id.as_str())
             .collect()
     };
-    assert_eq!(techniques(0), [expected::CLOUD_ACCOUNT]);
+    // The chain at machine speed names the distant address and the workload address.
+    assert_eq!(techniques(0), [CLOUD_API, expected::CLOUD_ACCOUNT]);
     assert_eq!(
         techniques(1),
         [
@@ -270,7 +274,12 @@ async fn each_report_gives_the_attack_techniques_of_its_detections() {
     );
     assert_eq!(
         techniques(2),
-        [expected::CLOUD_ACCOUNT, expected::ROLE_ASSIGN, "T1552"]
+        [
+            CLOUD_API,
+            expected::CLOUD_ACCOUNT,
+            expected::ROLE_ASSIGN,
+            "T1552"
+        ]
     );
 
     let spray = &package.reports[1];
@@ -309,7 +318,7 @@ async fn each_claim_has_evidence_items_that_the_report_holds() {
         .iter()
         .map(|report| report.claims().count())
         .collect();
-    assert_eq!(claim_counts, [2, 8, 8]);
+    assert_eq!(claim_counts, [3, 8, 9]);
     for report in &package.reports {
         let address = subject_address(report);
         for claim in report.claims() {
@@ -508,7 +517,7 @@ async fn the_manifest_hashes_are_the_sha256_of_the_items() {
         .map(|report| report.evidence.len())
         .collect();
     // The log records of the address, and one audit record for each detection.
-    assert_eq!(item_counts, [3 + 1, 603 + 4, 6 + 4]);
+    assert_eq!(item_counts, [3 + 2, 603 + 4, 6 + 5]);
 
     for report in &package.reports {
         let manifest = &report.manifest;
@@ -609,28 +618,38 @@ async fn a_changed_evidence_file_fails_the_manifest_check() {
 async fn the_audit_evidence_holds_the_record_hash_and_no_record_text() {
     let (incident, events) = support::attack_incident().await;
     let audit = support::audit_chain(&incident);
-    assert_eq!(audit.len(), 8);
+    assert_eq!(audit.len(), 9);
     let package = AbuseReport::build(&incident, &events, &audit, &support::options()).unwrap();
     let distant = &package.reports[0];
-    let item: Value = serde_json::from_str(&distant.evidence[3].content).unwrap();
-    // The seventh detection of the incident is the one that names this address.
-    let record = &audit[6];
-    assert_eq!(
-        item,
-        serde_json::json!({
-            "item": "E0004",
-            "type": "audit_record",
-            "audit_kind": "detection",
-            "sequence": 7,
-            "record": record.id.to_string(),
-            "time": "2026-11-03T09:10:52.005Z",
-            "record_hash": record.hash,
-            "detections": [incident.detections[6].id.to_string()],
-        })
-    );
-    assert_eq!(distant.evidence[3].kind, EvidenceItemKind::AuditRecord);
-    assert!(record.summary.contains("Principal acts from two places"));
-    assert!(!distant.evidence[3].content.contains("Principal"));
+    // The seventh and the eighth detection of the incident name this address: the chain
+    // at machine speed, and the principal in two places. Each has one audit record.
+    assert_eq!(distant.evidence.len(), 5);
+    for (position, sequence, title, word) in [
+        (3, 7, "Chain of sensitive actions at machine speed", "Chain"),
+        (4, 8, "Principal acts from two places", "Principal"),
+    ] {
+        let item: Value = serde_json::from_str(&distant.evidence[position].content).unwrap();
+        let record = &audit[sequence - 1];
+        assert_eq!(
+            item,
+            serde_json::json!({
+                "item": format!("E000{}", position + 1),
+                "type": "audit_record",
+                "audit_kind": "detection",
+                "sequence": sequence,
+                "record": record.id.to_string(),
+                "time": "2026-11-03T09:10:52.005Z",
+                "record_hash": record.hash,
+                "detections": [incident.detections[sequence - 1].id.to_string()],
+            })
+        );
+        assert_eq!(
+            distant.evidence[position].kind,
+            EvidenceItemKind::AuditRecord
+        );
+        assert!(record.summary.contains(title), "{}", record.summary);
+        assert!(!distant.evidence[position].content.contains(word));
+    }
 }
 
 #[tokio::test]
@@ -958,11 +977,11 @@ async fn a_network_map_adds_one_report_for_each_hosting_network() {
     assert_eq!(network.addresses.len(), 2);
     assert_eq!(network.addresses[0].address, fixtures::SPRAY_IP);
     assert_eq!(network.addresses[1].address, fixtures::WORKLOAD_IP);
-    assert_eq!(network.evidence.len(), 603 + 6 + 8);
-    assert_eq!(network.claims().count(), 16);
+    assert_eq!(network.evidence.len(), 603 + 6 + 9);
+    assert_eq!(network.claims().count(), 17);
     let ids: Vec<&str> = network.claims().map(|claim| claim.id.as_str()).collect();
     assert_eq!(ids[0], "C1");
-    assert_eq!(ids[15], "C16");
+    assert_eq!(ids[16], "C17");
     network.check().unwrap();
     network
         .manifest
@@ -1010,7 +1029,9 @@ async fn a_network_map_adds_one_report_for_each_hosting_network() {
             addresses: vec![fixtures::DISTANT_IP],
         }
     );
-    assert_eq!(cloud_report.evidence.len(), 4);
+    // Three log records of the address, and one audit record for each of its two
+    // detections.
+    assert_eq!(cloud_report.evidence.len(), 3 + 2);
 }
 
 #[tokio::test]

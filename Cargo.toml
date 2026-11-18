@@ -17,6 +17,7 @@ aegis-app = { path = "crates/app", default-features = false }
 aegis-bus = { path = "crates/bus" }
 aegis-contracts = { path = "crates/contracts" }
 aegis-core = { path = "crates/core" }
+aegis-decoy = { path = "crates/decoy" }
 aegis-detect = { path = "crates/detect" }
 aegis-ingest = { path = "crates/ingest" }
 aegis-memory = { path = "crates/memory" }
@@ -24,6 +25,7 @@ aegis-model = { path = "crates/model" }
 aegis-plugin = { path = "crates/plugin" }
 aegis-policy = { path = "crates/policy" }
 aegis-respond = { path = "crates/respond" }
+aegis-share = { path = "crates/share" }
 aegis-storage = { path = "crates/storage" }
 aegis-testkit = { path = "crates/testkit" }
 

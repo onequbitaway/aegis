@@ -28,3 +28,9 @@ level: medium
 tags:
   - attack.credential-access
   - attack.t1621
+# An attacker who knows the password can cause this event in any number. One account
+# gives one detection in ten minutes.
+aegis.suppress:
+  window_seconds: 600
+  fields:
+    - actor.id

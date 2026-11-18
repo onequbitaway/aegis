@@ -87,6 +87,24 @@ pub(crate) fn truncate(text: &str, limit: usize) -> String {
     }
 }
 
+/// Returns `text` as one line with no control characters and no more than `limit`
+/// characters.
+///
+/// Use this for text from a caller that goes into an audit record or a message.
+pub(crate) fn clean_text(text: &str, limit: usize) -> String {
+    let line: String = text
+        .chars()
+        .map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect();
+    truncate(line.trim(), limit)
+}
+
 #[cfg(test)]
 mod tests {
     use aegis_contracts::action::ActionKind;
@@ -137,6 +155,17 @@ mod tests {
             "{denied:?}"
         );
         assert!(!denied.is_retryable());
+    }
+
+    #[test]
+    fn clean_text_removes_control_characters_and_limits_the_length() {
+        assert_eq!(clean_text("  Undo it.\n", 100), "Undo it.");
+        assert_eq!(
+            clean_text("line one\nline\ttwo\u{7}", 100),
+            "line one line two"
+        );
+        assert_eq!(clean_text("éàüö", 2), "éà...");
+        assert_eq!(clean_text(" \r\n ", 100), "");
     }
 
     #[test]

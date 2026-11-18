@@ -3,6 +3,9 @@
 # Each address is in a documentation range (RFC 5737 and RFC 3849). Each domain uses the
 # reserved top-level domain "example" (RFC 2606). No value refers to a real system.
 # Replace this file with indicators from your threat intelligence source.
+#
+# The keys first_seen, last_seen, source, and suppress_seconds are optional. The indicator
+# export of AEGIS writes them. The last indicator shows them.
 indicators:
   - type: ip
     value: 192.0.2.200/29
@@ -46,3 +49,14 @@ indicators:
     tags:
       - attack.credential-access
       - attack.t1528
+  - type: client_fingerprint
+    value: example-fingerprint-7c1d09
+    description: Example fingerprint of a client that contacted a decoy.
+    severity: medium
+    tags:
+      - attack.reconnaissance
+      - attack.t1595
+    first_seen: "2026-01-05T08:00:00Z"
+    last_seen: "2026-01-06T17:30:00Z"
+    source: example decoy export
+    suppress_seconds: 3600

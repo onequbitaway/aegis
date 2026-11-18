@@ -30,6 +30,80 @@ pub(crate) fn time_before(time: DateTime<Utc>, delta: TimeDelta) -> DateTime<Utc
         .unwrap_or(DateTime::<Utc>::MIN_UTC)
 }
 
+/// The start of the identifier of a client fingerprint entity.
+pub const CLIENT_FINGERPRINT_PREFIX: &str = "client_fingerprint:";
+
+/// The largest number of characters of a client fingerprint that an identifier keeps.
+const MAX_FINGERPRINT_CHARS: usize = 128;
+
+/// Returns `text` with no control characters and with at most `limit` characters.
+///
+/// An event field can hold text that an attacker wrote. Use this function before the text
+/// goes into a description, a log line, or a summary.
+#[must_use]
+pub fn clean_text(text: &str, limit: usize) -> String {
+    text.chars()
+        .filter(|character| !character.is_control())
+        .take(limit)
+        .collect()
+}
+
+/// Returns the first 16 bytes of the SHA-256 digest of the parts, as a number.
+///
+/// Each part goes into the digest with its length, so that two different lists of parts
+/// do not give one digest. Use the number as a state key for text that an attacker can
+/// select: a collision is not practical.
+pub(crate) fn digest128(parts: &[&[u8]]) -> u128 {
+    let mut hasher = Sha256::new();
+    for part in parts {
+        hasher.update(u64::try_from(part.len()).unwrap_or(u64::MAX).to_be_bytes());
+        hasher.update(part);
+    }
+    let digest = hasher.finalize();
+    let mut bytes = [0_u8; 16];
+    for (target, source) in bytes.iter_mut().zip(digest.iter()) {
+        *target = *source;
+    }
+    u128::from_be_bytes(bytes)
+}
+
+/// Returns the form of a client fingerprint that the detectors compare.
+///
+/// A fingerprint of at most 128 visible ASCII characters stays as it is, in lower case.
+/// All other text becomes `sha256:` and 32 hexadecimal digits of its digest. The result is
+/// thus short and has no control characters. The result of this function stays the same
+/// when you give it to the function again. An empty fingerprint gives `None`.
+#[must_use]
+pub fn fingerprint_token(fingerprint: &str) -> Option<String> {
+    let fingerprint = fingerprint.trim();
+    if fingerprint.is_empty() {
+        return None;
+    }
+    let is_plain = fingerprint.len() <= MAX_FINGERPRINT_CHARS
+        && fingerprint.bytes().all(|byte| byte.is_ascii_graphic());
+    if is_plain {
+        return Some(fingerprint.to_ascii_lowercase());
+    }
+    Some(format!(
+        "sha256:{:032x}",
+        digest128(&[b"aegis-detect/fingerprint", fingerprint.as_bytes()])
+    ))
+}
+
+/// Returns the entity for the client fingerprint of an event, if the event has one.
+///
+/// The fingerprint is the attribute `client_fingerprint`. The entity has the kind `other`,
+/// so that no response action selects it by its kind. Its identifier is
+/// [`CLIENT_FINGERPRINT_PREFIX`] and the [`fingerprint_token`].
+#[must_use]
+pub fn fingerprint_entity(event: &Event) -> Option<EntityRef> {
+    let token = fingerprint_token(event.attribute_str(attr::CLIENT_FINGERPRINT)?)?;
+    Some(EntityRef::new(
+        EntityKind::Other,
+        format!("{CLIENT_FINGERPRINT_PREFIX}{token}"),
+    ))
+}
+
 /// Returns the name of a severity, as the contracts encode it.
 #[must_use]
 pub fn severity_name(severity: Severity) -> &'static str {
@@ -204,18 +278,21 @@ pub(crate) fn push_entity(entities: &mut Vec<EntityRef>, entity: EntityRef) {
 
 /// Returns the entities that an event involves, with no duplicates.
 ///
-/// The list has the actor, the address of the actor, the target, and the application of the
-/// `app_id` attribute.
+/// The list has the actor, the address of the actor, the client fingerprint, the target,
+/// and the application of the `app_id` attribute.
 ///
-/// For an authentication event, the list has only the actor and the address. The target of
-/// a sign-in is a resource that many principals share. It would link incidents that are not
-/// related.
+/// For an authentication event, the list has only the actor, the address, and the client
+/// fingerprint. The target of a sign-in is a resource that many principals share. It would
+/// link incidents that are not related.
 #[must_use]
 pub fn event_entities(event: &Event) -> Vec<EntityRef> {
-    let mut entities = Vec::with_capacity(4);
+    let mut entities = Vec::with_capacity(5);
     entities.push(event.actor.entity());
     if let Some(ip) = event.actor.ip {
         push_entity(&mut entities, ip_entity(ip));
+    }
+    if let Some(fingerprint) = fingerprint_entity(event) {
+        push_entity(&mut entities, fingerprint);
     }
     if event.class != EventClass::Authentication {
         if let Some(target) = &event.target {
@@ -457,6 +534,92 @@ mod tests {
         assert_eq!(entities.len(), 2);
         assert_eq!(entities[0].kind, EntityKind::User);
         assert_eq!(entities[1].kind, EntityKind::IpAddress);
+    }
+
+    #[test]
+    fn event_entities_has_the_client_fingerprint_also_for_a_sign_in() {
+        let with_fingerprint = |class: EventClass, action: &str| {
+            event(class, action).with_attribute(attr::CLIENT_FINGERPRINT, "FP-1")
+        };
+        let entities = event_entities(&with_fingerprint(EventClass::Other, action::DECOY_CONTACT));
+        let keys: Vec<(EntityKind, &str)> = entities
+            .iter()
+            .map(|entity| (entity.kind, entity.id.as_str()))
+            .collect();
+        assert_eq!(
+            keys,
+            [
+                (EntityKind::User, "user-1"),
+                (EntityKind::IpAddress, "203.0.113.9"),
+                (EntityKind::Other, "client_fingerprint:fp-1"),
+                (EntityKind::Application, "app-1"),
+            ]
+        );
+        let sign_in = event_entities(&with_fingerprint(
+            EventClass::Authentication,
+            action::SIGN_IN,
+        ));
+        assert_eq!(sign_in.len(), 3);
+        assert_eq!(
+            sign_in[2],
+            EntityRef::new(EntityKind::Other, "client_fingerprint:fp-1")
+        );
+    }
+
+    #[test]
+    fn a_fingerprint_token_is_short_visible_text_and_is_stable() {
+        assert_eq!(fingerprint_token("  AbC-123  ").as_deref(), Some("abc-123"));
+        assert_eq!(fingerprint_token(""), None);
+        assert_eq!(fingerprint_token("   "), None);
+        // Text with a space, a control character, or other characters becomes a digest.
+        for text in ["two words", "line\nbreak", "caf\u{e9}", &"a".repeat(129)] {
+            let token = fingerprint_token(text).unwrap();
+            assert_eq!(token.len(), "sha256:".len() + 32, "{text:?}");
+            assert!(token.starts_with("sha256:"), "{token}");
+            assert!(token.bytes().all(|byte| byte.is_ascii_graphic()));
+            // The token of a token is the same token.
+            assert_eq!(fingerprint_token(&token).as_deref(), Some(token.as_str()));
+            assert_eq!(fingerprint_token(text).as_deref(), Some(token.as_str()));
+        }
+        assert_eq!(fingerprint_token(&"a".repeat(128)).unwrap().len(), 128);
+        assert_ne!(
+            fingerprint_token("two words"),
+            fingerprint_token("two  words")
+        );
+    }
+
+    #[test]
+    fn the_fingerprint_entity_has_the_kind_other_and_needs_a_text_attribute() {
+        let base = event(EventClass::Other, action::DECOY_CONTACT);
+        assert_eq!(fingerprint_entity(&base), None);
+        let entity =
+            fingerprint_entity(&base.clone().with_attribute(attr::CLIENT_FINGERPRINT, "x"));
+        assert_eq!(
+            entity,
+            Some(EntityRef::new(EntityKind::Other, "client_fingerprint:x"))
+        );
+        let number = base.clone().with_attribute(attr::CLIENT_FINGERPRINT, 5);
+        assert_eq!(fingerprint_entity(&number), None);
+        let empty = base.with_attribute(attr::CLIENT_FINGERPRINT, " ");
+        assert_eq!(fingerprint_entity(&empty), None);
+    }
+
+    #[test]
+    fn clean_text_removes_control_characters_and_limits_the_length() {
+        assert_eq!(clean_text("a\u{1b}[31mb\r\nc\u{7}", 100), "a[31mbc");
+        assert_eq!(clean_text("abcdef", 3), "abc");
+        assert_eq!(clean_text("\u{e9}\u{e9}\u{e9}", 2), "\u{e9}\u{e9}");
+        assert_eq!(clean_text("", 5), "");
+        assert_eq!(clean_text("abc", 0), "");
+    }
+
+    #[test]
+    fn the_digest_depends_on_each_part_and_on_where_the_parts_end() {
+        let digest = digest128(&[b"ab", b"c"]);
+        assert_eq!(digest, digest128(&[b"ab", b"c"]));
+        assert_ne!(digest, digest128(&[b"a", b"bc"]));
+        assert_ne!(digest, digest128(&[b"abc"]));
+        assert_ne!(digest, digest128(&[b"ab", b"c", b""]));
     }
 
     #[test]

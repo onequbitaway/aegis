@@ -100,6 +100,13 @@ dry_run = true
 playbooks = "dry_run"
 playbook_dir = "playbooks"
 
+# The timed revert. A containment action with a revert time runs first. AEGIS reverts it
+# at that time, unless a person confirms it. The file holds the pending reverts, so that
+# a restart does not lose them. One process uses one file. Without this table, an action
+# with a revert time runs only as a dry run.
+[response.revert]
+store = "data/pending-reverts.json"
+
 [ingest]
 checkpoint_dir = "data/checkpoints"
 
@@ -117,6 +124,43 @@ checkpoint_dir = "data/checkpoints"
 #
 # [model.routes]
 # default = [{ provider = "local" }]
+
+# The evidence archive: each detection, the events that caused it, and each state of an
+# incident, as JSON Lines. The commands `aegis report abuse` and `aegis indicators export`
+# read it. The file holds raw log records. Protect it as you protect your logs.
+[evidence]
+path = "data/evidence.jsonl"
+# The largest number of bytes that the archive keeps. The oldest half goes first.
+max_bytes = 67108864
+
+# The sharing commands write documents that you can send to other defenders. They send
+# nothing. They need all public networks of your organization, so that no document names
+# an address of your own. Without `operator_networks`, the commands refuse to run.
+# [share]
+# operator_networks = ["198.51.100.0/24"]
+# operator_domains = ["operator.example.org"]
+
+# A decoy service: a tarpit, a maze, and a decoy model API for clients that have no
+# permission. No legitimate client uses its address, so each contact is a signal. To
+# start it, remove the comment mark from the lines of the [decoy] section below. It runs
+# with the module "ingest".
+#   - NEVER use the address of a production endpoint. Use an address and a port that no
+#     legitimate client uses. Do not use the address of the operator API.
+#   - `seed_env` is the NAME of the environment variable that holds the seed. The seed
+#     has 32 characters or more. Make one with: openssl rand -hex 32
+#   - `value_env` is the NAME of the variable that holds a decoy key. A decoy key gives
+#     no access to any system. Plant it only where no legitimate process reads it.
+#   - A decoy only answers a client that connects to it. It slows and misleads that
+#     client. It never damages the client.
+# [decoy]
+# id = "decoy-lab"
+# bind = "127.0.0.1:8081"
+# personas = ["tarpit", "maze", "model_api"]
+# seed_env = "AEGIS_DECOY_SEED"
+#
+# [[decoy.model_api.keys]]
+# id = "ht-decoy-model-key"
+# value_env = "AEGIS_DECOY_MODEL_KEY"
 
 # The operator API: the REST API, the web console at "/", and ChatOps.
 # To start it, add "api" to `enabled` in [modules], and remove the comment mark from the

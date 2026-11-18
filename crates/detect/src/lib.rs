@@ -15,10 +15,12 @@
 //! | --- | --- |
 //! | [`engine`] | [`DetectionEngine`]: the two tiers and the correlator as one unit, and the bus runner. |
 //! | [`sigma`] | The Sigma rule engine. The module documentation lists the supported parts of Sigma. |
-//! | [`ioc`] | The indicator store: addresses, networks, domains, user agents, application identifiers. |
-//! | [`velocity`] | The stateful detectors: sign-in burst, privileged self-assignment, credential after grant, impossible speed. |
+//! | [`ioc`] | The indicator store: addresses, networks, domains, user agents, application identifiers, client fingerprints. |
+//! | [`velocity`] | The stateful detectors: sign-in burst, privileged self-assignment, credential after grant, impossible speed, machine cadence, endpoint probe. |
 //! | [`llm`] | [`LlmTriage`]: tier 2. |
 //! | [`correlate`] | [`Correlator`]: detections to incidents. |
+//! | [`flood`] | The limits that protect the engine from a flood of events: suppression, the tier 2 quota, and the incident coalescer. |
+//! | [`export`] | The detections of decoys as an indicator file. |
 //! | [`pack`] | [`RulePack`]: a directory of rules and indicators that the engine loads as one unit. |
 //! | [`attack`] | MITRE ATT&CK names for rule tags. |
 //! | [`common`] | Names, entities, and stable identifiers that the detectors share. |
@@ -88,7 +90,9 @@ pub mod common;
 pub mod correlate;
 pub mod engine;
 pub mod error;
+pub mod export;
 mod files;
+pub mod flood;
 pub mod ioc;
 pub mod llm;
 pub mod pack;
@@ -98,10 +102,13 @@ pub mod velocity;
 pub use correlate::{Correlator, CorrelatorConfig};
 pub use engine::{BusRunnerConfig, DetectionEngine, EngineConfig, EngineOutput, RunSummary};
 pub use error::DetectError;
+pub use export::{ExportOptions, export_decoy_indicators};
+pub use flood::{FloodCounters, IncidentCoalescer, SuppressionSummary};
 pub use ioc::{Indicator, IndicatorKind, IocStore};
 pub use llm::{LlmTriage, LlmTriageConfig};
 pub use pack::{PackManifest, RulePack};
 pub use sigma::{SigmaDetector, SigmaRule};
 pub use velocity::{
-    CredentialAfterGrant, ImpossibleSpeed, PrivilegedSelfAssignment, SignInBurst, VelocityConfig,
+    CredentialAfterGrant, EndpointProbe, ImpossibleSpeed, MachineCadence, PrivilegedSelfAssignment,
+    SignInBurst, VelocityConfig,
 };

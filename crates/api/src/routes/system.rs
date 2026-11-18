@@ -1,6 +1,6 @@
 //! The health, session, status, and agent routes.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use aegis_agents::{RunReport, RuntimeState, TaskRecord};
 use aegis_contracts::agent::AgentRole;
@@ -18,6 +18,7 @@ use super::audit::{AuditHead, find_audit_head};
 use super::{Caller, Ctx};
 use crate::error::{ApiError, ApiResult};
 use crate::extract::{JsonBody, Params};
+use crate::state::FloodStatus;
 
 /// The maximum length of a goal, in characters.
 pub(crate) const MAX_GOAL_CHARACTERS: usize = 4_000;
@@ -84,9 +85,19 @@ pub(crate) struct Status {
     modules: Vec<&'static str>,
     agents: AgentCounters,
     audit: AuditStatus,
+    /// The counts of the flood protection, if the composition root gives them.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    flood: Option<FloodStatus>,
+    /// More fields from the composition root, for example the decoy service.
+    #[serde(flatten)]
+    sections: BTreeMap<String, serde_json::Value>,
 }
 
-/// `GET /status`: the modules, the agent runtime, and the head of the audit log.
+/// The names of the fields that the status route makes itself.
+const STATUS_FIELDS: [&str; 5] = ["version", "modules", "agents", "audit", "flood"];
+
+/// `GET /status`: the modules, the agent runtime, the head of the audit log, and the
+/// counts of the flood protection.
 pub(crate) async fn status(
     State(ctx): State<Ctx>,
     RawQuery(query): RawQuery,
@@ -98,6 +109,15 @@ pub(crate) async fn status(
         known.clone_from(&head);
         head
     };
+    let (flood, mut sections) = match ctx.state.status() {
+        Some(source) => {
+            let system = source.status().await;
+            (Some(system.flood), system.sections)
+        }
+        None => (None, BTreeMap::new()),
+    };
+    // A field of the composition root cannot replace a field of this route.
+    sections.retain(|name, _| !STATUS_FIELDS.contains(&name.as_str()));
     Ok(Json(Status {
         version: env!("CARGO_PKG_VERSION"),
         modules: ctx
@@ -109,6 +129,8 @@ pub(crate) async fn status(
             .collect(),
         agents: agent_counters(&ctx),
         audit: AuditStatus { head },
+        flood,
+        sections,
     }))
 }
 

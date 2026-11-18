@@ -9,6 +9,8 @@
 //! | [`OperatorApi`] | The API state from the services of the application, and the `[api]` section. |
 //! | [`BoundApi`] | An [`OperatorApi`] with its listener. |
 //! | [`AppApprovals`] | The approval path of the API. It calls the application. |
+//! | [`AppReverts`] | The path of the API for timed reverts and for the revert of an action. |
+//! | [`AppStatus`] | The data of the application for the status route: the flood counters. |
 //!
 //! # The services
 //!
@@ -27,12 +29,13 @@
 //! # A request that goes away
 //!
 //! The API has a time limit for each request, and a client can close its connection.
-//! The server then drops the work of the request. Two operations must not stop in the
+//! The server then drops the work of the request. Three operations must not stop in the
 //! middle, so they run in tasks of their own:
 //!
 //! - **A decision.** [`AppApprovals`] records the decision, runs the approved action, and
 //!   gives the result to the agent in one task. The task completes also when the request
 //!   is gone.
+//! - **A revert.** [`AppReverts`] confirms, moves, or does a revert in one task.
 //! - **One action of a playbook.** Each action of a playbook that the API starts goes
 //!   through the dispatcher in one task. A request that goes away stops the playbook
 //!   between two actions, never in the middle of one.
@@ -80,14 +83,18 @@
 use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
-pub use aegis_api::{ApiConfig, ApiParts, ApiState, ApprovalActions, ApprovalDecision};
+pub use aegis_api::{
+    ApiConfig, ApiParts, ApiState, ApprovalActions, ApprovalDecision, FloodStatus, RevertActions,
+    StatusSource, SystemStatus,
+};
 use aegis_contracts::action::{ActionDispatcher, ActionDisposition, ActionRequest};
-use aegis_contracts::common::ApprovalId;
+use aegis_contracts::common::{ActionId, ApprovalId};
 use aegis_contracts::policy::Principal;
 use aegis_contracts::{Error, Result};
 use aegis_core::{Module, Shutdown};
-use aegis_respond::PlaybookEngine;
+use aegis_respond::{PendingRevert, PlaybookEngine};
 use async_trait::async_trait;
 use tokio::net::TcpListener;
 use tokio_util::task::TaskTracker;
@@ -204,6 +211,134 @@ impl ApprovalActions for AppApprovals {
     }
 }
 
+/// The path of the operator API for timed reverts and for the revert of an action: a
+/// [`RevertActions`] that calls the application.
+///
+/// Each operation checks the permission `approve_actions` of the principal again. The
+/// revert scheduler and the dispatcher write each audit record with the principal. A
+/// revert goes through the policy, the approval queue, and the audit log.
+///
+/// Each operation that changes state runs in a task of its own. The task completes also
+/// when the caller drops the call, for example at the time limit of an HTTP request.
+pub struct AppReverts {
+    app: Arc<App>,
+    work: Detached,
+}
+
+impl AppReverts {
+    /// Makes the revert path of `app`.
+    #[must_use]
+    pub fn new(app: Arc<App>) -> Self {
+        Self::with_work(app, Detached::default())
+    }
+
+    fn with_work(app: Arc<App>, work: Detached) -> Self {
+        Self { app, work }
+    }
+
+    /// Waits until each operation that started is complete.
+    pub async fn settle(&self) {
+        self.work.settle().await;
+    }
+}
+
+#[async_trait]
+impl RevertActions for AppReverts {
+    fn enabled(&self) -> bool {
+        self.app.revert_scheduler().is_some()
+    }
+
+    async fn pending(&self) -> Result<Vec<PendingRevert>> {
+        self.app.pending_reverts().await
+    }
+
+    async fn confirm(&self, action_id: ActionId, principal: &Principal) -> Result<PendingRevert> {
+        let (app, principal) = (self.app.clone(), principal.clone());
+        self.work
+            .run("complete the confirmation of an action", async move {
+                app.confirm_revert(action_id, &principal).await
+            })
+            .await
+    }
+
+    async fn extend(
+        &self,
+        action_id: ActionId,
+        principal: &Principal,
+        extension: Duration,
+    ) -> Result<PendingRevert> {
+        let (app, principal) = (self.app.clone(), principal.clone());
+        self.work
+            .run("complete the change of a revert time", async move {
+                app.extend_revert(action_id, &principal, extension).await
+            })
+            .await
+    }
+
+    async fn cancel(
+        &self,
+        action_id: ActionId,
+        principal: &Principal,
+    ) -> Result<ActionDisposition> {
+        let (app, principal) = (self.app.clone(), principal.clone());
+        self.work
+            .run("complete the revert of an action", async move {
+                app.cancel_revert(action_id, &principal).await
+            })
+            .await
+    }
+
+    async fn revert(
+        &self,
+        action_id: ActionId,
+        principal: &Principal,
+        reason: &str,
+    ) -> Result<ActionDisposition> {
+        let (app, principal, reason) = (self.app.clone(), principal.clone(), reason.to_owned());
+        self.work
+            .run("complete the revert of an action", async move {
+                app.revert_action(action_id, &principal, &reason).await
+            })
+            .await
+    }
+}
+
+/// The data of the application for the status route of the operator API.
+///
+/// | Field of the status document | Contents |
+/// | --- | --- |
+/// | `flood` | The counts of the flood protection of the detection engine. |
+/// | `reverts` | `enabled`, the number of pending timed reverts, and the counts of the scheduler. |
+/// | `evidence` | The counts of the evidence archive, if the archive is on. |
+/// | `decoy` | The address and the counts of the decoy service, if it runs. |
+pub struct AppStatus {
+    app: Arc<App>,
+}
+
+impl AppStatus {
+    /// Makes the status source of `app`.
+    #[must_use]
+    pub fn new(app: Arc<App>) -> Self {
+        Self { app }
+    }
+}
+
+#[async_trait]
+impl StatusSource for AppStatus {
+    async fn status(&self) -> SystemStatus {
+        let counters = self.app.flood_counters();
+        SystemStatus {
+            flood: FloodStatus {
+                suppressed_matches: counters.suppressed_matches,
+                repeat_detections: counters.repeat_detections,
+                triage_quota_denials: counters.triage_quota_denials,
+                coalesced_incident_updates: counters.coalesced_incident_updates,
+            },
+            sections: self.app.status_sections().await,
+        }
+    }
+}
+
 /// The dispatcher of the playbooks that the API starts.
 ///
 /// It applies the playbook mode of the configuration, and it sends each request to the
@@ -290,7 +425,9 @@ impl OperatorApi {
             playbooks: playbook_engine(app, &work)?,
             approval_actions: Arc::new(AppApprovals::with_work(app.clone(), work.clone())),
             modules: app.modules().clone(),
-        });
+        })
+        .with_reverts(Arc::new(AppReverts::with_work(app.clone(), work.clone())))
+        .with_status(Arc::new(AppStatus::new(app.clone())));
         Ok(Self {
             config,
             state,

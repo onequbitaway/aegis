@@ -17,6 +17,7 @@ use aegis_contracts::model::{
     ChatRequest, Message, ModelProvider, ResponseFormat, TaskKind, ToolChoice,
 };
 use aegis_contracts::{Detection, DetectionTier, Error, Result, Verdict};
+use chrono::TimeDelta;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
@@ -25,6 +26,10 @@ use crate::error::DetectError;
 
 /// The key of the attribute that holds the result of tier 2.
 pub const TRIAGE_ATTRIBUTE: &str = "triage";
+
+/// The `status` in the tier 2 attribute of a detection that got no model request, because
+/// the quota of its source or its tenant had no request left.
+pub const TRIAGE_STATUS_QUOTA: &str = "quota";
 
 /// The largest number of reasons that a detection keeps.
 const MAX_REASONS: usize = 8;
@@ -66,6 +71,15 @@ pub struct LlmTriageConfig {
     pub benign_min_confidence: f64,
     /// The time in seconds after which a request fails with a timeout.
     pub timeout_seconds: u64,
+    /// The length in seconds of the window of the quota. A window starts with the first
+    /// request of a source or a tenant, in event time.
+    pub quota_window_seconds: u64,
+    /// The largest number of model requests in one window for the events of one source
+    /// connector. The engine applies it. A detection over the quota stays `suspicious`.
+    pub max_requests_per_source: u32,
+    /// The largest number of model requests in one window for one tenant. The engine
+    /// applies it. A detection over the quota stays `suspicious`.
+    pub max_requests_per_tenant: u32,
 }
 
 impl Default for LlmTriageConfig {
@@ -77,6 +91,9 @@ impl Default for LlmTriageConfig {
             max_output_tokens: 512,
             benign_min_confidence: 0.8,
             timeout_seconds: 60,
+            quota_window_seconds: 3_600,
+            max_requests_per_source: 120,
+            max_requests_per_tenant: 240,
         }
     }
 }
@@ -168,7 +185,8 @@ impl LlmTriageConfig {
     /// # Errors
     ///
     /// Returns [`DetectError::Config`] if `benign_min_confidence` is not a number from 0
-    /// to 1, or if `timeout_seconds` or `max_output_tokens` is zero.
+    /// to 1, or if `timeout_seconds`, `max_output_tokens`, `quota_window_seconds`,
+    /// `max_requests_per_source`, or `max_requests_per_tenant` is zero.
     pub fn validate(&self) -> std::result::Result<(), DetectError> {
         if !(0.0..=1.0).contains(&self.benign_min_confidence) {
             return Err(DetectError::Config(format!(
@@ -179,6 +197,15 @@ impl LlmTriageConfig {
         for (name, value) in [
             ("timeout_seconds", self.timeout_seconds),
             ("max_output_tokens", u64::from(self.max_output_tokens)),
+            ("quota_window_seconds", self.quota_window_seconds),
+            (
+                "max_requests_per_source",
+                u64::from(self.max_requests_per_source),
+            ),
+            (
+                "max_requests_per_tenant",
+                u64::from(self.max_requests_per_tenant),
+            ),
         ] {
             if value == 0 {
                 return Err(DetectError::Config(format!(
@@ -186,7 +213,21 @@ impl LlmTriageConfig {
                 )));
             }
         }
+        self.quota_window()?;
         Ok(())
+    }
+
+    /// Returns the window of the quota as a time difference.
+    pub(crate) fn quota_window(&self) -> std::result::Result<TimeDelta, DetectError> {
+        i64::try_from(self.quota_window_seconds)
+            .ok()
+            .and_then(TimeDelta::try_seconds)
+            .ok_or_else(|| {
+                DetectError::Config(format!(
+                    "llm_triage.quota_window_seconds is too large: {}",
+                    self.quota_window_seconds
+                ))
+            })
     }
 }
 
@@ -375,6 +416,29 @@ pub(crate) fn with_triage_failure(detection: &Detection, error: &Error) -> Detec
     result
         .attributes
         .insert(TRIAGE_ATTRIBUTE.to_owned(), json!(failure));
+    result
+}
+
+/// Returns a copy of `detection` that records that the tier 2 quota had no request left.
+///
+/// The verdict and the tier do not change. The engine sends no request to the model for
+/// the detection.
+pub(crate) fn with_triage_quota(
+    detection: &Detection,
+    scope: &str,
+    limit: u32,
+    window_seconds: u64,
+) -> Detection {
+    let mut result = detection.clone();
+    result.attributes.insert(
+        TRIAGE_ATTRIBUTE.to_owned(),
+        json!({
+            "status": TRIAGE_STATUS_QUOTA,
+            "scope": scope,
+            "limit": limit,
+            "window_seconds": window_seconds,
+        }),
+    );
     result
 }
 

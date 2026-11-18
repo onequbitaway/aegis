@@ -11,7 +11,7 @@ use aegis_contracts::common::ActionId;
 use aegis_contracts::policy::Principal;
 use aegis_contracts::source::ConnectorInfo;
 use aegis_contracts::{Error, Result};
-use aegis_respond::Dispatcher;
+use aegis_respond::{Dispatcher, friction, revert};
 use async_trait::async_trait;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -253,6 +253,11 @@ const SIMULATED_KINDS: [ActionKind; 14] = [
 /// is on. A configured connector for an action type thus always has priority. The
 /// connector does no network request and changes nothing. It refuses a request that is not
 /// a dry run with [`Error::Unsupported`], so it can never stand in for a real change.
+///
+/// The connector accepts the built-in action types and the two friction actions
+/// (`{custom: restrict_user_consent}` and `{custom: raise_friction}`). Thus a playbook with
+/// a friction step can run as a rehearsal. The outcome has `reversible: true` for an
+/// action type that has an inverse, as a real connector for that type reports.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SimulationConnector;
 
@@ -278,7 +283,10 @@ impl ActionConnector for SimulationConnector {
     }
 
     fn supported_actions(&self) -> Vec<ActionKind> {
-        SIMULATED_KINDS.to_vec()
+        let mut kinds = SIMULATED_KINDS.to_vec();
+        kinds.push(friction::restrict_user_consent());
+        kinds.push(friction::raise_friction());
+        kinds
     }
 
     async fn execute(&self, request: &ActionRequest) -> Result<ActionOutcome> {
@@ -299,7 +307,8 @@ impl ActionConnector for SimulationConnector {
                 request.target.id
             ),
             details: json!({ "configured_connector": false }),
-            reversible: false,
+            // A real connector for a type with an inverse can undo the action.
+            reversible: revert::kind_has_inverse(&request.kind),
             completed_at: Utc::now(),
         })
     }
@@ -480,14 +489,21 @@ mod tests {
     async fn the_simulation_connector_does_only_dry_runs() {
         let connector = SimulationConnector;
         assert_eq!(connector.info().name, "simulation");
-        assert_eq!(connector.supported_actions().len(), 14);
+        assert_eq!(connector.supported_actions().len(), 16);
 
         let dry = request(ActionKind::DisableServicePrincipal, true);
         let outcome = connector.execute(&dry).await.unwrap();
         assert_eq!(outcome.action_id, dry.id);
         assert_eq!(outcome.status, ActionStatus::Simulated);
         assert_eq!(outcome.connector, "simulation");
-        assert!(!outcome.reversible);
+        // The action type has an inverse, so a real connector can undo it.
+        assert!(outcome.reversible);
+        // An action type with no inverse is not reversible.
+        let session = connector
+            .execute(&request(ActionKind::KillSession, true))
+            .await
+            .unwrap();
+        assert!(!session.reversible);
         assert_eq!(
             outcome.message,
             "Dry run: a connector for disable_service_principal would act on 203.0.113.50. No \
@@ -501,6 +517,43 @@ mod tests {
                 if message == "no connector is configured for the action \
                     disable_service_principal: the simulation connector does only dry runs"),
             "{error:?}"
+        );
+        // A friction action is a custom action. The connector reports that a real
+        // connector can undo it, so a playbook with a friction step can run as a rehearsal.
+        for kind in [
+            friction::restrict_user_consent(),
+            friction::raise_friction(),
+        ] {
+            assert!(connector.supported_actions().contains(&kind), "{kind:?}");
+            let outcome = connector
+                .execute(&request(kind.clone(), true))
+                .await
+                .unwrap();
+            assert_eq!(outcome.status, ActionStatus::Simulated, "{kind:?}");
+            assert!(outcome.reversible, "{kind:?}");
+            let error = connector
+                .execute(&request(kind.clone(), false))
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(error, Error::Unsupported(_)),
+                "{kind:?}: {error:?}"
+            );
+        }
+        let consent = connector
+            .execute(&request(friction::restrict_user_consent(), true))
+            .await
+            .unwrap();
+        assert_eq!(
+            consent.message,
+            "Dry run: a connector for custom:restrict_user_consent would act on 203.0.113.50. \
+             No connector is configured for this action. Nothing changed."
+        );
+        // A different custom action has no connector.
+        assert!(
+            !connector
+                .supported_actions()
+                .contains(&ActionKind::Custom("quarantine_mailbox".to_owned()))
         );
         // The default `revert` of the contract also changes nothing.
         let revert = connector.revert(&live).await.unwrap_err();

@@ -1,0 +1,27 @@
+title: Automated agent followed a canary instruction of a decoy
+id: ce68feda-b68d-4690-9d03-ba2f31cf87ac
+status: test
+description: >-
+  A client asked for a canary path of a decoy. Only a hidden instruction in the content
+  of the decoy names this path, and only an automated agent reads that instruction. The
+  client is an automated agent that acts on the content of the decoy.
+author: AEGIS project
+references:
+  - https://attack.mitre.org/techniques/T1595/
+detection:
+  selection:
+    action: decoy.canary_hit
+  condition: selection
+falsepositives:
+  - A test of the canary by the security team.
+level: high
+tags:
+  - attack.reconnaissance
+  - attack.t1595
+# One client and one canary give one detection in ten minutes.
+aegis.suppress:
+  window_seconds: 600
+  fields:
+    - actor.ip
+    - client_fingerprint
+    - canary_id

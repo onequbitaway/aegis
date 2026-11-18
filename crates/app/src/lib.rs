@@ -81,12 +81,16 @@ pub mod api;
 mod app;
 pub mod audit;
 mod bridge;
+#[cfg(feature = "decoy")]
+pub mod decoy;
+pub mod evidence;
 pub mod incidents;
 pub mod offline;
 pub mod playbooks;
 mod preflight;
 pub mod report;
 pub mod settings;
+pub mod sharing;
 pub mod starter;
 
 pub use app::{

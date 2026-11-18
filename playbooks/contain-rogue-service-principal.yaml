@@ -9,6 +9,10 @@
 #
 # Each step continues after a failure. Thus a containment step that fails does not stop
 # the notification and the ticket. The run report shows each failure.
+#
+# The two reversible containment steps have a timed revert. If no person confirms the
+# action in 4 hours, AEGIS reverts it. The removal of the credential and the stop of the
+# sessions have no inverse, so they have no timed revert.
 name: contain-rogue-service-principal
 description: >-
   Disable a service principal that shows signs of attacker control, revoke its new
@@ -28,10 +32,12 @@ steps:
     target:
       each_entity: service_principal
     max_targets: 5
+    revert_after: 4h
     reason: >-
       Incident {{incident.id}} ({{incident.severity}}): the service principal
       {{target.name}} shows signs of attacker control ({{incident.techniques}}).
-      Disable it. The operator can enable it again.
+      Disable it. AEGIS enables it again after 4 hours, unless a person confirms the
+      action.
     continue_on_error: true
 
   - id: revoke-credential
@@ -62,13 +68,15 @@ steps:
     target:
       each_entity: ip_address
     max_targets: 10
+    revert_after: 4h
     parameters:
       direction: inbound
       duration_hours: 72
       comment: "AEGIS incident {{incident.id}}"
     reason: >-
       Incident {{incident.id}}: the attack came from the address {{target.id}}. Block it
-      in the firewall of the operator.
+      in the firewall of the operator. AEGIS removes the block after 4 hours, unless a
+      person confirms it.
     continue_on_error: true
 
   - id: notify-security-team
@@ -84,7 +92,9 @@ steps:
       techniques: "{{incident.techniques}}"
     reason: >-
       Incident {{incident.id}} ({{incident.severity}}): AEGIS started the containment of a
-      rogue service principal. Playbook: {{playbook.name}}.
+      rogue service principal. Playbook: {{playbook.name}}. Confirm the disabled service
+      principal and the blocked address to keep them. AEGIS reverts an action with no
+      confirmation after 4 hours.
     continue_on_error: true
 
   - id: open-ticket

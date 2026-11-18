@@ -10,15 +10,34 @@
 //! | [`ActionKind::KillSession`] | `POST /users/{id}/revokeSignInSessions` | No |
 //! | [`ActionKind::RevokeCredential`] | `POST /{collection}/{id}/removePassword` | No |
 //! | [`ActionKind::RotateCredential`] | `POST /{collection}/{id}/addPassword`, then `removePassword` | No |
+//! | `{custom: restrict_user_consent}` | `GET`, then `PATCH /policies/authorizationPolicy` | Yes |
 //!
 //! `{collection}` is `servicePrincipals` or `applications`. The type of the target selects it.
+//!
+//! # Friction: stop user consent
+//!
+//! The custom action [`RESTRICT_USER_CONSENT`](crate::friction::RESTRICT_USER_CONSENT) is a
+//! friction action. Refer to [`friction`]. Its target is the tenant of the
+//! connector. The connector reads `defaultUserRolePermissions.permissionGrantPoliciesAssigned`
+//! of the authorization policy. It removes each entry that starts with
+//! `ManagePermissionGrantsForSelf.` and keeps all other entries. Users then cannot consent
+//! to applications. An administrator can still consent.
+//!
+//! The outcome details hold the earlier list and the new list. Refer to [`detail`]. The
+//! lists are not secrets. `revert` gets these details in the request parameter
+//! `execution_details` and writes the earlier list again, exactly as it was.
+//!
+//! `revert` does not replace a setting that a different administrator changed after the
+//! action. If the present list is not the list that the connector wrote, the result has the
+//! status `skipped` and the connector changes nothing.
 //!
 //! # Application permissions
 //!
 //! Give the application registration only the permissions for the actions that you use:
-//! `Application.ReadWrite.All` for service principals and credentials, and
+//! `Application.ReadWrite.All` for service principals and credentials,
 //! `User.ReadWrite.All` (or `User.EnableDisableAccount.All` and
-//! `User.RevokeSessions.All`) for users.
+//! `User.RevokeSessions.All`) for users, and `Policy.ReadWrite.Authorization` for
+//! `restrict_user_consent`.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -39,8 +58,10 @@ use tokio::time::Instant;
 use url::Url;
 
 use super::http;
+use crate::friction;
 use crate::lock;
 use crate::names::{entity_label, same_kind, snake_name};
+use crate::revert::EXECUTION_DETAILS_PARAMETER;
 
 /// The names of the request parameters that this connector reads.
 pub mod parameter {
@@ -59,6 +80,21 @@ pub mod parameter {
     pub const DISPLAY_NAME: &str = "display_name";
 }
 
+/// The names of the fields that the connector writes to the outcome details of
+/// `restrict_user_consent`.
+pub mod detail {
+    /// The object that holds the user consent data.
+    pub const USER_CONSENT: &str = "user_consent";
+    /// The list `permissionGrantPoliciesAssigned` from before the action. `revert` writes
+    /// this list again.
+    pub const PREVIOUS: &str = "previous_permission_grant_policies";
+    /// The list `permissionGrantPoliciesAssigned` that the action wrote.
+    pub const APPLIED: &str = "applied_permission_grant_policies";
+    /// The list `permissionGrantPoliciesAssigned` that `revert` found, if it is not the
+    /// list that the action wrote.
+    pub const CURRENT: &str = "current_permission_grant_policies";
+}
+
 const VENDOR: &str = "microsoft";
 const PRODUCT: &str = "entra_id";
 const DEFAULT_NAME: &str = "entra-graph";
@@ -72,6 +108,13 @@ const MAX_ID_LENGTH: usize = 256;
 const MAX_NAME_LENGTH: usize = 120;
 const BODY_LIMIT: usize = 64 * 1024;
 const REDACTED: &str = "[REDACTED]";
+/// The path of the authorization policy of the tenant.
+const AUTHORIZATION_POLICY: [&str; 2] = ["policies", "authorizationPolicy"];
+/// The start of each permission grant policy that lets a user consent for itself. The
+/// comparison ignores the case of the letters.
+const USER_CONSENT_PREFIX: &str = "managepermissiongrantsforself.";
+const MAX_GRANT_POLICIES: usize = 200;
+const MAX_GRANT_POLICY_LENGTH: usize = 256;
 
 fn default_name() -> String {
     DEFAULT_NAME.to_owned()
@@ -225,6 +268,21 @@ impl Call {
         )
     }
 
+    fn read_authorization_policy() -> Self {
+        Self::new(Method::GET, &AUTHORIZATION_POLICY, None)
+    }
+
+    /// Returns the request that writes the list `permissionGrantPoliciesAssigned`.
+    fn write_grant_policies(policies: &[String]) -> Self {
+        Self::new(
+            Method::PATCH,
+            &AUTHORIZATION_POLICY,
+            Some(json!({
+                "defaultUserRolePermissions": { "permissionGrantPoliciesAssigned": policies }
+            })),
+        )
+    }
+
     fn path(&self) -> String {
         format!("/{}", self.segments.join("/"))
     }
@@ -260,6 +318,67 @@ enum Operation {
         old_key_id: String,
         display_name: String,
     },
+    /// Remove the permission grant policies that let a user consent for itself.
+    RestrictUserConsent,
+    /// Write the permission grant policies from before [`Operation::RestrictUserConsent`].
+    RestoreUserConsent {
+        previous: Vec<String>,
+        applied: Vec<String>,
+    },
+}
+
+/// Returns `true` if a permission grant policy lets a user consent for itself.
+fn is_user_consent_policy(policy: &str) -> bool {
+    policy.to_ascii_lowercase().starts_with(USER_CONSENT_PREFIX)
+}
+
+/// Returns `true` if the list is a valid value of `permissionGrantPoliciesAssigned`.
+///
+/// The connector writes the list to the audit log and sends it again in a revert, so each
+/// entry must be a short identifier.
+fn grant_policies_are_valid(policies: &[String]) -> bool {
+    policies.len() <= MAX_GRANT_POLICIES
+        && policies.iter().all(|policy| {
+            !policy.is_empty()
+                && policy.len() <= MAX_GRANT_POLICY_LENGTH
+                && policy.chars().all(|character| {
+                    character.is_ascii_alphanumeric() || matches!(character, '.' | '-' | '_')
+                })
+        })
+}
+
+/// Returns `true` if two lists hold the same permission grant policies.
+fn same_grant_policies(left: &[String], right: &[String]) -> bool {
+    let normal = |list: &[String]| {
+        let mut names: Vec<String> = list
+            .iter()
+            .map(|policy| policy.to_ascii_lowercase())
+            .collect();
+        names.sort_unstable();
+        names.dedup();
+        names
+    };
+    normal(left) == normal(right)
+}
+
+/// Reads the lists that `restrict_user_consent` saved, from the parameter
+/// `execution_details` of a revert request.
+fn saved_grant_policies(request: &ActionRequest) -> Result<(Vec<String>, Vec<String>)> {
+    let saved = request
+        .parameters
+        .get(EXECUTION_DETAILS_PARAMETER)
+        .and_then(|details| details.get(detail::USER_CONSENT));
+    let list = |name: &str| -> Option<Vec<String>> {
+        let policies: Vec<String> = serde_json::from_value(saved?.get(name)?.clone()).ok()?;
+        grant_policies_are_valid(&policies).then_some(policies)
+    };
+    match (list(detail::PREVIOUS), list(detail::APPLIED)) {
+        (Some(previous), Some(applied)) => Ok((previous, applied)),
+        _ => Err(Error::InvalidInput(format!(
+            "the revert of {} needs the parameter {EXECUTION_DETAILS_PARAMETER} with the user consent data of the action; revert the action through the dispatcher",
+            friction::RESTRICT_USER_CONSENT
+        ))),
+    }
 }
 
 /// Returns the identifier of the target, after a check that it is safe in a URL path.
@@ -388,6 +507,15 @@ impl Operation {
                 display_name: text_parameter(request, parameter::DISPLAY_NAME)?
                     .unwrap_or_else(|| format!("aegis rotation {}", request.id)),
             }),
+            (ActionKind::Custom(name), false) if name == friction::RESTRICT_USER_CONSENT => {
+                require_kind(request, &[EntityKind::Tenant])?;
+                Ok(Self::RestrictUserConsent)
+            }
+            (ActionKind::Custom(name), true) if name == friction::RESTRICT_USER_CONSENT => {
+                require_kind(request, &[EntityKind::Tenant])?;
+                let (previous, applied) = saved_grant_policies(request)?;
+                Ok(Self::RestoreUserConsent { previous, applied })
+            }
             (kind, _) => Err(Error::Unsupported(format!(
                 "the Microsoft Graph connector does not support the action {}",
                 snake_name(kind)
@@ -430,11 +558,29 @@ impl Operation {
                 ),
                 Call::remove_password(collection, id, old_key_id),
             ],
+            // The new list depends on the present list. A dry run sends no request, so the
+            // plan describes the new list.
+            Self::RestrictUserConsent => vec![
+                Call::read_authorization_policy(),
+                Call::write_grant_policies(&[
+                    "<each present entry that does not start with ManagePermissionGrantsForSelf.>"
+                        .to_owned(),
+                ]),
+            ],
+            Self::RestoreUserConsent { previous, .. } => vec![
+                Call::read_authorization_policy(),
+                Call::write_grant_policies(previous),
+            ],
         }
     }
 
     fn reversible(&self) -> bool {
-        matches!(self, Self::SetAccountEnabled { .. })
+        matches!(
+            self,
+            Self::SetAccountEnabled { .. }
+                | Self::RestrictUserConsent
+                | Self::RestoreUserConsent { .. }
+        )
     }
 
     /// Returns the words that complete "Would ..." and "Did ...".
@@ -445,6 +591,8 @@ impl Operation {
             Self::RevokeSessions { .. } => "revoke the sign-in sessions of",
             Self::RemovePassword { .. } => "remove one password credential from",
             Self::RotatePassword { .. } => "replace one password credential of",
+            Self::RestrictUserConsent => "stop user consent to applications in",
+            Self::RestoreUserConsent { .. } => "restore the user consent settings of",
         }
     }
 }
@@ -476,6 +624,18 @@ struct GraphFailure {
 struct GraphFailureBody {
     #[serde(default)]
     code: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct AuthorizationPolicy {
+    #[serde(rename = "defaultUserRolePermissions")]
+    default_user_role_permissions: DefaultUserRolePermissions,
+}
+
+#[derive(Deserialize)]
+struct DefaultUserRolePermissions {
+    #[serde(rename = "permissionGrantPoliciesAssigned")]
+    permission_grant_policies_assigned: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -580,15 +740,26 @@ impl GraphActionConnector {
     }
 
     /// Refuses a target that the telemetry puts in a different tenant.
+    ///
+    /// A target of the type `tenant` must be the tenant of the connector.
     fn check_tenant(&self, target: &EntityRef) -> Result<()> {
+        let is_own = |tenant: &str| {
+            self.tenants
+                .iter()
+                .any(|own| own.eq_ignore_ascii_case(tenant))
+        };
+        if target.kind == EntityKind::Tenant && !is_own(&target.id) {
+            return Err(Error::InvalidInput(format!(
+                "the target {} is not the tenant of connector {}, which manages the tenant {} only",
+                entity_label(target),
+                self.name,
+                self.tenants.first().map_or("", String::as_str)
+            )));
+        }
         let Some(tenant) = target.tenant.as_deref() else {
             return Ok(());
         };
-        if self
-            .tenants
-            .iter()
-            .any(|own| own.eq_ignore_ascii_case(tenant))
-        {
+        if is_own(tenant) {
             return Ok(());
         }
         Err(Error::InvalidInput(format!(
@@ -787,6 +958,119 @@ impl GraphActionConnector {
         }))
     }
 
+    /// Reads the list `permissionGrantPoliciesAssigned` of the authorization policy.
+    async fn read_grant_policies(&self, call: &Call) -> Result<Vec<String>> {
+        let body = self.send(call).await?;
+        let invalid = || {
+            Error::Serialization(
+                "Microsoft Graph returned an authorization policy that is not valid; the connector changed nothing"
+                    .to_owned(),
+            )
+        };
+        let policy: AuthorizationPolicy = serde_json::from_slice(&body).map_err(|_| invalid())?;
+        let policies = policy
+            .default_user_role_permissions
+            .permission_grant_policies_assigned;
+        if !grant_policies_are_valid(&policies) {
+            return Err(invalid());
+        }
+        Ok(policies)
+    }
+
+    /// Removes the permission grant policies that let a user consent for itself.
+    ///
+    /// The outcome details hold the earlier list, so that `revert` can write it again.
+    async fn restrict_user_consent(&self, request: &ActionRequest) -> Result<ActionOutcome> {
+        let label = entity_label(&request.target);
+        let read = Call::read_authorization_policy();
+        let previous = self.read_grant_policies(&read).await?;
+        let applied: Vec<String> = previous
+            .iter()
+            .filter(|policy| !is_user_consent_policy(policy))
+            .cloned()
+            .collect();
+        let saved = json!({ detail::PREVIOUS: previous, detail::APPLIED: applied });
+        if applied.len() == previous.len() {
+            return Ok(self.outcome(
+                request,
+                ActionStatus::Skipped,
+                format!(
+                    "Users of {label} already cannot consent to applications. No change was necessary."
+                ),
+                json!({ "requests": [read.describe()], detail::USER_CONSENT: saved }),
+                false,
+            ));
+        }
+        let write = Call::write_grant_policies(&applied);
+        self.send(&write).await?;
+        Ok(self.outcome(
+            request,
+            ActionStatus::Succeeded,
+            format!("Did {} {label}.", Operation::RestrictUserConsent.verb()),
+            json!({
+                "requests": [read.describe(), write.describe()],
+                detail::USER_CONSENT: saved,
+            }),
+            true,
+        ))
+    }
+
+    /// Writes the permission grant policies from before `restrict_user_consent` again.
+    ///
+    /// The connector writes only if the present list is the list that the action wrote. It
+    /// does not replace a setting that a different administrator changed after the action.
+    async fn restore_user_consent(
+        &self,
+        request: &ActionRequest,
+        previous: &[String],
+        applied: &[String],
+    ) -> Result<ActionOutcome> {
+        let label = entity_label(&request.target);
+        let read = Call::read_authorization_policy();
+        let current = self.read_grant_policies(&read).await?;
+        let unchanged = |message: String| {
+            self.outcome(
+                request,
+                ActionStatus::Skipped,
+                message,
+                json!({
+                    "requests": [read.describe()],
+                    detail::USER_CONSENT: {
+                        detail::PREVIOUS: previous,
+                        detail::APPLIED: applied,
+                        detail::CURRENT: current,
+                    },
+                }),
+                false,
+            )
+        };
+        if same_grant_policies(&current, previous) {
+            return Ok(unchanged(format!(
+                "The user consent settings of {label} already have the earlier value. No change was necessary."
+            )));
+        }
+        if !same_grant_policies(&current, applied) {
+            return Ok(unchanged(format!(
+                "A different administrator changed the user consent settings of {label} after the action. The connector did not replace the new settings. Restore the earlier settings by hand if that is necessary."
+            )));
+        }
+        let write = Call::write_grant_policies(previous);
+        self.send(&write).await?;
+        Ok(self.outcome(
+            request,
+            ActionStatus::Succeeded,
+            format!("Did restore the user consent settings of {label}."),
+            json!({
+                "requests": [read.describe(), write.describe()],
+                detail::USER_CONSENT: {
+                    detail::PREVIOUS: previous,
+                    detail::APPLIED: applied,
+                },
+            }),
+            true,
+        ))
+    }
+
     async fn run(&self, request: &ActionRequest, revert: bool) -> Result<ActionOutcome> {
         self.check_tenant(&request.target)?;
         let operation = Operation::plan(request, revert)?;
@@ -804,6 +1088,13 @@ impl GraphActionConnector {
                 json!({ "planned_requests": planned }),
                 operation.reversible(),
             ));
+        }
+        match &operation {
+            Operation::RestrictUserConsent => return self.restrict_user_consent(request).await,
+            Operation::RestoreUserConsent { previous, applied } => {
+                return self.restore_user_consent(request, previous, applied).await;
+            }
+            _ => {}
         }
         let rotation = if let Operation::RotatePassword { old_key_id, .. } = &operation {
             self.rotate(request, &calls, old_key_id).await?
@@ -841,6 +1132,7 @@ impl ActionConnector for GraphActionConnector {
             ActionKind::KillSession,
             ActionKind::RevokeCredential,
             ActionKind::RotateCredential,
+            friction::restrict_user_consent(),
         ]
     }
 
@@ -848,10 +1140,15 @@ impl ActionConnector for GraphActionConnector {
         self.run(request, false).await
     }
 
-    /// Enables an account that [`execute`](Self::execute) disabled.
+    /// Enables an account that [`execute`](Self::execute) disabled, or writes the user
+    /// consent settings from before `restrict_user_consent` again.
     ///
-    /// Only [`ActionKind::DisableServicePrincipal`] and [`ActionKind::DisableUser`] have an
-    /// inverse. All other actions return [`Error::Unsupported`].
+    /// Only [`ActionKind::DisableServicePrincipal`], [`ActionKind::DisableUser`], and
+    /// `restrict_user_consent` have an inverse. All other actions return
+    /// [`Error::Unsupported`].
+    ///
+    /// The revert of `restrict_user_consent` reads the earlier settings from the request
+    /// parameter `execution_details`. The dispatcher sets this parameter.
     async fn revert(&self, request: &ActionRequest) -> Result<ActionOutcome> {
         self.run(request, true).await
     }

@@ -18,8 +18,12 @@ The program is a thin layer on `aegis-app`. It is defensive only.
 | `aegis audit verify --path <file>` | Checks the hash chain of an audit log file. |
 | `aegis audit show --path <file> [--limit N]` | Prints the newest records of an audit log file. |
 | `aegis config check --config <file>` | Reports each problem of a configuration. Starts nothing. |
+| `aegis reverts list\|confirm\|extend\|cancel` | Shows and decides the timed reverts of a running service, through its operator API. |
+| `aegis report abuse --config <file> --incident <id> --out <dir>` | Writes the abuse reports of one incident. Sends nothing. |
+| `aegis indicators export --config <file> --format stix\|csv\|pack --tlp <level> --out <file>` | Writes the indicators of the evidence archive. Sends nothing. |
 
-All commands have the option `--format text|json`. The default is `text`.
+All commands have the option `--format text|json`. The default is `text`. For
+`aegis indicators export`, the option selects the document: `stix`, `csv`, or `pack`.
 
 ## Output and exit status
 
@@ -177,6 +181,51 @@ The command starts no source, no detection, no agent, and no server. It opens no
 The exit status is 1 if the configuration has a problem. Each problem names its section.
 The report has the key `api`: the address in `api.bind`, or `off`.
 
+With the `[decoy]` section and the module `ingest`, step 2 also reads the seed and each
+decoy key. The report has the keys `decoy` (the address in `decoy.bind`, or `off`),
+`timed_revert` (the store file, or `off`), and `evidence_archive` (the file, or `off`).
+
+### `aegis reverts`
+
+A timed revert is a containment action that AEGIS reverts at a set time, unless a person
+confirms it. The running service holds the pending reverts in one store file, and one
+scheduler uses one store. Thus these commands do not read the file. They call the
+operator API of the running service. The service must run with the module `api`.
+
+| Command | Effect |
+| --- | --- |
+| `aegis reverts list` | Lists the pending reverts, earliest revert time first. |
+| `aegis reverts confirm <ACTION_ID>` | The containment stays. AEGIS does not revert it. |
+| `aegis reverts extend <ACTION_ID> --by 2h` | Moves the revert time. The unit is `s`, `m`, `h`, or `d`. |
+| `aegis reverts cancel <ACTION_ID>` | Reverts the action now, through the policy of the service. |
+
+- `--url` gives the address of the operator API. The default is the value of the
+  environment variable `AEGIS_API_URL`, or `http://127.0.0.1:8080`.
+- The token comes from the environment variable `AEGIS_API_TOKEN`. `--token-env` names a
+  different variable. The token is never an argument.
+- The principal of the token needs the permission `approve_actions`.
+- The commands send the token only over HTTPS, or over HTTP to a loopback address. They
+  follow no redirect.
+- The commands exist only in a build with the Cargo feature `api`.
+
+### `aegis report abuse` and `aegis indicators export`
+
+The two commands write documents for other defenders. They send nothing. They read the
+configuration, the audit log, and the evidence archive, and they open no file of the
+service for a write. Refer to [`docs/sharing.md`](../../docs/sharing.md).
+
+- `report abuse` makes one directory for each attacker address in `--out`, with
+  `report.md`, `report.json`, `evidence.jsonl`, and `manifest.json`.
+- `indicators export` writes one file. `--format stix` and `--format csv` need `--tlp`:
+  `white`, `green`, `amber`, or `red`. `--format pack` writes the detections of decoys as
+  an indicator file for a rule pack.
+- The two commands need `operator_networks` in the `[share]` section. With none, they
+  refuse and write no file.
+- The output says which evidence the command had.
+- The commands replace no file. One exception: `--format pack` adds its indicators to an
+  indicator file that exists.
+- On Unix, only the owner can read a file that a command wrote.
+
 ## Cargo features
 
 | Feature | Effect |
@@ -184,12 +233,13 @@ The report has the key `api`: the address in `api.bind`, or `off`.
 | `postgres` | PostgreSQL storage and the PostgreSQL audit log. |
 | `plugins` | WebAssembly connector plugins. |
 | `otlp` | The OpenTelemetry trace exporter. |
-| `api` | The operator API: the module `api` and the `[api]` section. |
+| `api` | The operator API: the module `api` and the `[api]` section. Also the commands `aegis reverts`, which are a client of that API. |
+| `decoy` | The decoy service: the `[decoy]` section. |
 | `grpc` | The gRPC services of the operator API, on the port of the REST API. It includes `api`. |
 
-`postgres`, `plugins`, `otlp`, and `api` are default features. `grpc` is not. Each one goes
-to the same feature of `aegis-app`. The monitoring-only build has none of them, and it has
-no HTTP server:
+`postgres`, `plugins`, `otlp`, `api`, and `decoy` are default features. `grpc` is not. Each
+one goes to the same feature of `aegis-app`. The monitoring-only build has none of them. It
+has no HTTP server, no HTTP client, and no decoy:
 
 ```sh
 cargo build -p aegis-cli --no-default-features
@@ -216,11 +266,15 @@ cargo test -p aegis-cli --all-features
 outside the loopback address, and no credentials.
 
 One test starts `aegis run` with the operator API on a loopback port that the operating
-system selects, sends requests to it, and stops it with SIGTERM. This test runs only on a
-Unix system. It sends the signal with the `kill` program.
+system selects, sends requests to it, and stops it with SIGTERM. The same test runs the
+`aegis reverts` commands against that service. This test runs only on a Unix system. It
+sends the signal with the `kill` program.
+
+Two tests run the demonstration and then the sharing commands. They check each report
+file against its manifest, and they check the STIX bundle and the CSV file.
 
 ```sh
 cargo test -p aegis-cli --no-default-features
 ```
 
-This command tests the build with no operator API.
+This command tests the build with no operator API and no decoy.

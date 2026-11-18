@@ -40,6 +40,7 @@ use support::{Starter, WAIT, live, replace_once, spray_events, with_modules};
 const ALICE_TOKEN: &str = "alice-0123456789abcdef0123456789abcdef";
 const VERA_TOKEN: &str = "vera-0123456789abcdef0123456789abcdef0";
 const ROOT_TOKEN: &str = "root-0123456789abcdef0123456789abcdef0";
+const BOB_TOKEN: &str = "bob-0123456789abcdef0123456789abcdef01";
 
 /// The modules of the tests: detection, the agents that propose actions, and the API.
 const MODULES: [&str; 6] = [
@@ -79,6 +80,7 @@ fn env(name: &str) -> Option<String> {
         "AEGIS_TEST_TOKEN_ALICE" => Some(ALICE_TOKEN.to_owned()),
         "AEGIS_TEST_TOKEN_VERA" => Some(VERA_TOKEN.to_owned()),
         "AEGIS_TEST_TOKEN_ROOT" => Some(ROOT_TOKEN.to_owned()),
+        "AEGIS_TEST_TOKEN_BOB" => Some(BOB_TOKEN.to_owned()),
         _ => None,
     }
 }
@@ -154,6 +156,11 @@ impl TestConnector {
     fn executed(&self) -> Vec<ActionRequest> {
         self.record.executed()
     }
+
+    /// Returns the requests that the connector undid.
+    fn reverted(&self) -> Vec<ActionRequest> {
+        self.record.reverted()
+    }
 }
 
 #[async_trait]
@@ -173,6 +180,10 @@ impl ActionConnector for TestConnector {
             .await
             .map_err(|_| Error::Unavailable("the test dropped the connector".to_owned()))?;
         self.record.execute(request).await
+    }
+
+    async fn revert(&self, request: &ActionRequest) -> Result<ActionOutcome> {
+        self.record.revert(request).await
     }
 }
 
@@ -436,7 +447,7 @@ async fn an_operator_sees_the_incident_and_approves_a_gated_action_through_http(
     assert_eq!(items.len(), 1);
     assert_eq!(id_of::<Incident>(&items[0]).id, incident.id);
     assert_eq!(items[0]["severity"], "critical");
-    assert_eq!(items[0]["detections"].as_array().unwrap().len(), 8);
+    assert_eq!(items[0]["detections"].as_array().unwrap().len(), 9);
 
     // The pending request is in the list, with the action of the Responder.
     let request = program.the_block_request().await;
@@ -1116,7 +1127,7 @@ async fn start_playbook(
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_api_has_no_playbook_when_the_playbooks_are_off() {
     let desk = Desk::new(TestConnector::new(), |text| text).await;
-    assert_eq!(desk.app.playbooks().names().len(), 5);
+    assert_eq!(desk.app.playbooks().names().len(), 6);
     let server = desk.serve().await;
 
     assert_eq!(playbook_names(&server.http).await, Vec::<String>::new());
@@ -1604,5 +1615,281 @@ async fn an_approval_through_grpc_runs_the_action_one_time() {
     let again = decide(Some(ALICE_TOKEN)).await;
     assert_eq!(status(&again).as_deref(), Some(FAILED_PRECONDITION));
     assert_eq!(desk.connector.calls(), 1);
+    server.stop().await;
+}
+
+/// The changes of the live configuration for "contain first": the playbooks run live,
+/// the example policy lets a reversible action with a short revert time run first, and a
+/// second person, Bob, can approve.
+fn contain_first(text: &str) -> String {
+    let text = playbook_mode(text, "live");
+    let text = replace_once(
+        &text,
+        "paths = [\"policies/default.rego\"]",
+        "paths = [\"policies/examples/contain_first_with_timed_revert.rego\"]",
+    );
+    text + "\n[[api.principals]]\nid = \"bob@example.com\"\nroles = [\"approver\"]\n\
+            token_env = \"AEGIS_TEST_TOKEN_BOB\"\n"
+}
+
+/// Returns the pending timed reverts, as the API lists them.
+async fn pending_reverts(http: &Http) -> Vec<Value> {
+    let page = http.json("/api/v1/reverts", VERA_TOKEN).await;
+    assert_eq!(page["enabled"], true);
+    let items = page["items"].as_array().unwrap().clone();
+    assert_eq!(page["total"], items.len());
+    items
+}
+
+/// Returns the audit records of the revert scheduler with the field `event` set to `name`.
+async fn scheduler_records(app: &App, name: &str) -> Vec<AuditRecord> {
+    app.audit()
+        .read(1, 100_000)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|record| record.kind == AuditKind::Other && record.payload["event"] == name)
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_person_decides_the_timed_reverts_through_http() {
+    let desk = Desk::new(TestConnector::new(), |text| contain_first(&text)).await;
+    let server = desk.serve().await;
+    let http = &server.http;
+    let spray_address = fixtures::SPRAY_IP.to_string();
+
+    // The playbook blocked the spray address with a revert time of 4 hours.
+    let pending = pending_reverts(http).await;
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0]["kind"], "block_ip");
+    assert_eq!(pending[0]["target"]["id"], spray_address.as_str());
+    assert_eq!(pending[0]["revert_after_seconds"], 14_400);
+    assert_eq!(pending[0]["state"], "waiting");
+    assert_eq!(
+        pending[0]["requested_by"],
+        format!("playbook:{SPRAY_PLAYBOOK}")
+    );
+    let action: ActionId = id_of(&pending[0]["action_id"]);
+    let due_at: chrono::DateTime<chrono::Utc> = id_of(&pending[0]["due_at"]);
+
+    // Each route needs a token, and each change needs the permission to approve. Vera can
+    // read. Root has the role `admin`, which cannot approve.
+    let changes = [
+        (format!("/api/v1/reverts/{action}/confirm"), json!({})),
+        (
+            format!("/api/v1/reverts/{action}/extend"),
+            json!({ "seconds": 600 }),
+        ),
+        (format!("/api/v1/reverts/{action}/cancel"), json!({})),
+        (
+            format!("/api/v1/actions/{action}/revert"),
+            json!({ "reason": "A test." }),
+        ),
+    ];
+    let records_before = desk.app.audit().read(1, 100_000).await.unwrap().len();
+    assert_eq!(
+        Http::refused(http.get("/api/v1/reverts", None).await, 401).await,
+        "unauthorized"
+    );
+    for (path, body) in &changes {
+        assert_eq!(
+            Http::refused(http.post(path, None, body).await, 401).await,
+            "unauthorized",
+            "{path}"
+        );
+        let unknown = "not-a-token-0123456789abcdef0123456789";
+        assert_eq!(
+            Http::refused(http.post(path, Some(unknown), body).await, 401).await,
+            "unauthorized",
+            "{path}"
+        );
+        for token in [VERA_TOKEN, ROOT_TOKEN] {
+            assert_eq!(
+                Http::refused(http.post(path, Some(token), body).await, 403).await,
+                "forbidden",
+                "{path}"
+            );
+        }
+    }
+    assert_eq!(pending_reverts(http).await, pending);
+    assert_eq!(desk.connector.reverted(), []);
+    assert_eq!(
+        desk.app.audit().read(1, 100_000).await.unwrap().len(),
+        records_before
+    );
+
+    // Alice moves the revert time, and then she confirms the block.
+    let response = http
+        .post(
+            &changes[1].0,
+            Some(ALICE_TOKEN),
+            &json!({ "seconds": 3600 }),
+        )
+        .await;
+    assert_eq!(response.status(), 200);
+    let moved: Value = response.json().await.unwrap();
+    let new_due_at: chrono::DateTime<chrono::Utc> = id_of(&moved["revert"]["due_at"]);
+    assert_eq!(new_due_at, due_at + chrono::Duration::seconds(3600));
+    let response = http
+        .post(&changes[0].0, Some(ALICE_TOKEN), &json!({}))
+        .await;
+    assert_eq!(response.status(), 200);
+    let confirmed: Value = response.json().await.unwrap();
+    assert_eq!(confirmed["revert"]["action_id"], json!(action));
+    assert_eq!(pending_reverts(http).await, Vec::<Value>::new());
+    assert_eq!(desk.connector.reverted(), []);
+    for (name, count) in [("timed_revert_extended", 1), ("timed_revert_confirmed", 1)] {
+        let records = scheduler_records(&desk.app, name).await;
+        assert_eq!(records.len(), count, "{name}");
+        assert_eq!(records[0].actor, "alice@example.com", "{name}");
+        assert_eq!(records[0].payload["action_id"], json!(action), "{name}");
+    }
+    // A confirmed action has no pending revert.
+    let again = http
+        .post(&changes[0].0, Some(ALICE_TOKEN), &json!({}))
+        .await;
+    assert_eq!(Http::refused(again, 404).await, "not_found");
+
+    // The status shows the timed reverts and the flood counters.
+    let status = http.json("/api/v1/status", VERA_TOKEN).await;
+    assert_eq!(
+        status["reverts"],
+        json!({
+            "enabled": true, "pending": 0, "reverted": 0, "failed_attempts": 0,
+            "confirmed": 1, "extended": 1, "cancelled": 0, "closed": 0
+        })
+    );
+    assert_eq!(
+        status["flood"],
+        json!({
+            "suppressed_matches": 0, "repeat_detections": 0, "triage_quota_denials": 0,
+            "coalesced_incident_updates": 0
+        })
+    );
+
+    // Root runs the playbook again. The new block has a new pending revert.
+    let response = start_playbook(http, &desk.incident, "live", ROOT_TOKEN).await;
+    assert_eq!(response.status(), 200);
+    let pending = pending_reverts(http).await;
+    assert_eq!(pending.len(), 1);
+    let second: ActionId = id_of(&pending[0]["action_id"]);
+    assert_ne!(second, action);
+
+    // Alice reverts the block now. With the example policy, a revert that a person
+    // requests needs approval, so the block stays until a second person approves.
+    let response = http
+        .post(
+            &format!("/api/v1/reverts/{second}/cancel"),
+            Some(ALICE_TOKEN),
+            &json!({}),
+        )
+        .await;
+    assert_eq!(response.status(), 200);
+    let answer: Value = response.json().await.unwrap();
+    let approval: ApprovalId = id_of(&answer["disposition"]["pending_approval"]["approval_id"]);
+    assert_eq!(desk.connector.reverted(), []);
+    assert_eq!(pending_reverts(http).await.len(), 1);
+    let decision_path = format!("/api/v1/approvals/{approval}/decision");
+    let own = http
+        .post(
+            &decision_path,
+            Some(ALICE_TOKEN),
+            &json!({ "approve": true }),
+        )
+        .await;
+    assert_eq!(Http::refused(own, 403).await, "forbidden");
+    assert_eq!(desk.connector.reverted(), []);
+    let response = http
+        .post(&decision_path, Some(BOB_TOKEN), &json!({ "approve": true }))
+        .await;
+    assert_eq!(response.status(), 200);
+    let decision: Value = response.json().await.unwrap();
+    assert_eq!(decision["disposition"]["executed"]["status"], "succeeded");
+    let reverted = desk.connector.reverted();
+    assert_eq!(reverted.len(), 1);
+    assert_eq!(reverted[0].id, second);
+    assert_eq!(reverted[0].target.id, spray_address);
+    assert_eq!(pending_reverts(http).await, Vec::<Value>::new());
+
+    // The first block was confirmed. A person can still revert it, with a reason.
+    let response = http
+        .post(
+            &changes[3].0,
+            Some(ALICE_TOKEN),
+            &json!({ "reason": "The address is the proxy of a partner." }),
+        )
+        .await;
+    assert_eq!(response.status(), 200);
+    let answer: Value = response.json().await.unwrap();
+    assert!(
+        answer["disposition"]["pending_approval"]["approval_id"].is_string(),
+        "{answer}"
+    );
+    let missing = http
+        .post(&changes[3].0, Some(ALICE_TOKEN), &json!({}))
+        .await;
+    assert_eq!(Http::refused(missing, 400).await, "invalid_input");
+
+    // Each revert request is in the audit log with the principal that made it.
+    let records = desk.app.audit().read(1, 100_000).await.unwrap();
+    let proposals: Vec<&AuditRecord> = records
+        .iter()
+        .filter(|record| {
+            record.kind == AuditKind::ActionProposed && record.payload["operation"] == "revert"
+        })
+        .collect();
+    assert_eq!(proposals.len(), 2);
+    for proposal in &proposals {
+        assert_eq!(proposal.actor, "alice@example.com");
+        assert_eq!(proposal.payload["principal"]["id"], "alice@example.com");
+    }
+    assert_eq!(proposals[0].payload["reverts"]["action_id"], json!(second));
+    assert_eq!(proposals[1].payload["reverts"]["action_id"], json!(action));
+    assert_eq!(
+        proposals[1].payload["action"]["reason"],
+        "The address is the proxy of a partner."
+    );
+    assert!(desk.app.audit().verify().await.unwrap().valid);
+    server.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_api_shows_no_timed_revert_when_the_configuration_has_no_revert_table() {
+    let desk = Desk::new(TestConnector::new(), |text| {
+        let start = text.find("[response.revert]").unwrap();
+        let end = start + text[start..].find("\n\n").unwrap();
+        format!("{}{}", &text[..start], &text[end..])
+    })
+    .await;
+    assert!(desk.app.revert_scheduler().is_none());
+    let server = desk.serve().await;
+    let http = &server.http;
+
+    let page = http.json("/api/v1/reverts", VERA_TOKEN).await;
+    assert_eq!(page, json!({ "enabled": false, "items": [], "total": 0 }));
+    let status = http.json("/api/v1/status", VERA_TOKEN).await;
+    assert_eq!(status["reverts"], json!({ "enabled": false }));
+    let action = ActionId::new();
+    for (path, body) in [
+        (format!("/api/v1/reverts/{action}/confirm"), json!({})),
+        (
+            format!("/api/v1/reverts/{action}/extend"),
+            json!({ "seconds": 60 }),
+        ),
+        (format!("/api/v1/reverts/{action}/cancel"), json!({})),
+    ] {
+        let response = http.post(&path, Some(ALICE_TOKEN), &body).await;
+        assert_eq!(Http::refused(response, 501).await, "unsupported", "{path}");
+    }
+    // The revert of one action needs no revert table. The audit log has no such action.
+    let response = http
+        .post(
+            &format!("/api/v1/actions/{action}/revert"),
+            Some(ALICE_TOKEN),
+            &json!({ "reason": "A test." }),
+        )
+        .await;
+    assert_eq!(Http::refused(response, 404).await, "not_found");
     server.stop().await;
 }

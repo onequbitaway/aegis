@@ -8,8 +8,8 @@ use axum::http::StatusCode;
 use serde_json::{Value, json};
 
 use crate::support::{
-    ADMIN, AUDITOR, OPERATOR, PLAYBOOK_NAME, SPRAY_ADDRESS, TestApi, VIEWER, get, incident, post,
-    to_json,
+    ADMIN, AUDITOR, FLOOD, OPERATOR, PLAYBOOK_NAME, SPRAY_ADDRESS, TestApi, TestStatus, VIEWER,
+    config, get, incident, post, to_json,
 };
 
 async fn append(api: &TestApi, count: usize) {
@@ -140,6 +140,48 @@ async fn the_status_has_the_modules_the_agent_runtime_and_the_audit_head() {
 
     let reply = get(&router, "/api/v1/status?verbose=1", VIEWER).await;
     assert_eq!(reply.status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn the_status_has_the_flood_counters_and_the_fields_of_the_composition_root() {
+    let api = TestApi::new();
+    let state = api
+        .state
+        .clone()
+        .with_status(std::sync::Arc::new(TestStatus));
+    let router = aegis_api::router(state, &config()).unwrap();
+
+    let reply = get(&router, "/api/v1/status", VIEWER).await;
+    assert_eq!(reply.status, StatusCode::OK);
+    let body = reply.json();
+    assert_eq!(
+        body["flood"],
+        json!({
+            "suppressed_matches": 41,
+            "repeat_detections": 2,
+            "triage_quota_denials": 7,
+            "coalesced_incident_updates": 13
+        })
+    );
+    assert_eq!(body["flood"], to_json(&FLOOD));
+    assert_eq!(body["decoy"], json!({ "requests": 5 }));
+    // A field of the composition root does not replace a field of the route.
+    assert_eq!(body["version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(body["modules"], json!(["detection", "responder", "api"]));
+    // The order of the fields depends on a Cargo feature of `serde_json`. The test thus
+    // compares the set of the fields.
+    let fields: std::collections::BTreeSet<&str> = body
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(
+        fields,
+        std::collections::BTreeSet::from([
+            "agents", "audit", "decoy", "flood", "modules", "version"
+        ])
+    );
 }
 
 #[tokio::test]

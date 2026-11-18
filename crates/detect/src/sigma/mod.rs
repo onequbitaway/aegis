@@ -19,6 +19,7 @@
 //! | `logsource` | `product`, `service`, and `category`. Refer to the table below. |
 //! | `detection` | Named selections and one `condition`. |
 //! | `aegis.verdict` | `malicious` or `suspicious`. An AEGIS extension. |
+//! | `aegis.suppress` | One detection for one key in a window. An AEGIS extension. Refer to [`Suppression`]. |
 //!
 //! The engine ignores all other top-level keys, for example `author` and `references`.
 //!
@@ -86,11 +87,29 @@
 //! ```yaml
 //! aegis.verdict: suspicious
 //! ```
+//!
+//! ## Suppression
+//!
+//! A rule gives one detection for each event that matches. An attacker can use this to
+//! flood the engine. The key `aegis.suppress` makes the rule give ONE detection for one key
+//! in a window. The [`DetectionEngine`](crate::engine::DetectionEngine) applies it. The
+//! [`SigmaDetector`] alone keeps no state and does not apply it.
+//!
+//! ```yaml
+//! aegis.suppress:
+//!   window_seconds: 600
+//!   fields: [actor.ip, client_fingerprint]
+//!   repeat:
+//!     count: 10
+//!     level: high
+//! ```
+//!
+//! Refer to [`Suppression`] for each key.
 
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use aegis_contracts::common::Severity;
+use aegis_contracts::common::{DetectionId, EventId, Severity};
 use aegis_contracts::event::{Event, EventClass};
 use aegis_contracts::{AttackTechnique, Detection, DetectionTier, Detector, Result, Verdict};
 use async_trait::async_trait;
@@ -109,6 +128,13 @@ use crate::files::read_text;
 mod condition;
 mod field;
 mod matcher;
+mod suppress;
+
+pub use suppress::{MAX_SUPPRESSION_FIELDS, MAX_SUPPRESSION_WINDOW_SECONDS, Repeat, Suppression};
+
+/// The text that the rule identifier of a repeat detection has after the identifier of
+/// the rule.
+pub const REPEAT_RULE_SUFFIX: &str = ":repeated";
 
 /// The largest size of one rule file in bytes.
 pub const MAX_RULE_BYTES: u64 = 1024 * 1024;
@@ -242,6 +268,7 @@ pub struct SigmaRule {
     logsource: LogSource,
     selections: Vec<Selection>,
     condition: Condition,
+    suppression: Option<Suppression>,
 }
 
 impl SigmaRule {
@@ -336,6 +363,7 @@ impl SigmaRule {
         };
         let (names, selections) = compile_selections(detection)?;
         let condition = compile_condition(detection.get("condition"), &names)?;
+        let suppression = suppress_key(rule)?.map(Suppression::compile).transpose()?;
 
         Ok(Self {
             id,
@@ -353,6 +381,7 @@ impl SigmaRule {
             logsource,
             selections,
             condition,
+            suppression,
         })
     }
 
@@ -413,6 +442,12 @@ impl SigmaRule {
         &self.origin
     }
 
+    /// Returns the suppression settings of the rule: the key `aegis.suppress`.
+    #[must_use]
+    pub fn suppression(&self) -> Option<&Suppression> {
+        self.suppression.as_ref()
+    }
+
     /// Returns `false` for a rule with the status `deprecated` or `unsupported`.
     #[must_use]
     pub fn is_active(&self) -> bool {
@@ -463,6 +498,59 @@ impl SigmaRule {
     }
 }
 
+impl SigmaRule {
+    /// Makes the detection for a rule that matched `matches` times for one key in one
+    /// window. `event` is the last match, and `first` is the first match of the window.
+    ///
+    /// The rule identifier of the detection is the identifier of the rule and
+    /// [`REPEAT_RULE_SUFFIX`].
+    pub(crate) fn repeat_detection(
+        &self,
+        event: &Event,
+        repeat: Repeat,
+        matches: u64,
+        first: (Option<EventId>, DetectionId),
+    ) -> Detection {
+        let window_seconds = self
+            .suppression
+            .as_ref()
+            .map_or(0, Suppression::window_seconds);
+        let rule_id = format!("{}{REPEAT_RULE_SUFFIX}", self.id);
+        let (first_event, first_detection) = first;
+        let mut event_ids: Vec<EventId> = first_event
+            .into_iter()
+            .filter(|first_event| *first_event != event.id)
+            .collect();
+        event_ids.push(event.id);
+        Detection {
+            id: detection_id(&rule_id, &event_ids),
+            rule_id,
+            title: format!("{}: repeated", self.title),
+            description: format!(
+                "{} The rule matched {matches} times for one key in {window_seconds} seconds.",
+                self.description
+            )
+            .trim()
+            .to_owned(),
+            severity: repeat.level,
+            verdict: repeat.verdict,
+            tier: DetectionTier::Deterministic,
+            time: event.time,
+            attack: self.attack.clone(),
+            event_ids,
+            entities: event_entities(event),
+            tenant: event_tenant(event).map(str::to_owned),
+            attributes: BTreeMap::from([
+                ("detector".to_owned(), json!(SIGMA_DETECTOR_ID)),
+                ("action".to_owned(), json!(event.action)),
+                ("matches".to_owned(), json!(matches)),
+                ("window_seconds".to_owned(), json!(window_seconds)),
+                ("first_detection".to_owned(), json!(first_detection)),
+            ]),
+        }
+    }
+}
+
 fn text_key<'a>(
     map: &'a Map<String, Value>,
     key: &str,
@@ -486,6 +574,19 @@ fn verdict_key(rule: &Map<String, Value>) -> std::result::Result<Option<&str>, S
             Some(Value::String(text)) => Ok(Some(text)),
             Some(_) => Err("aegis.verdict must be a string".to_owned()),
         },
+        Some(_) => Err("aegis must be a map".to_owned()),
+    }
+}
+
+/// Reads `aegis.suppress`, as one key or as the key `suppress` in the map `aegis`.
+fn suppress_key(rule: &Map<String, Value>) -> std::result::Result<Option<&Value>, String> {
+    match rule.get("aegis.suppress") {
+        None | Some(Value::Null) => {}
+        Some(value) => return Ok(Some(value)),
+    }
+    match rule.get("aegis") {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Object(map)) => Ok(map.get("suppress").filter(|value| !value.is_null())),
         Some(_) => Err("aegis must be a map".to_owned()),
     }
 }
@@ -738,12 +839,25 @@ impl SigmaDetector {
 
     /// Evaluates each rule against the event. Returns one detection for each rule that
     /// matches.
+    ///
+    /// The detector keeps no state, so it does not apply `aegis.suppress`. The
+    /// [`DetectionEngine`](crate::engine::DetectionEngine) applies it.
     #[must_use]
     pub fn evaluate(&self, event: &Event) -> Vec<Detection> {
         self.rules
             .iter()
             .filter_map(|rule| rule.detect(event))
             .collect()
+    }
+
+    /// Returns each rule that matches the event, with its detection.
+    pub(crate) fn matches<'a>(
+        &'a self,
+        event: &'a Event,
+    ) -> impl Iterator<Item = (&'a SigmaRule, Detection)> {
+        self.rules
+            .iter()
+            .filter_map(move |rule| rule.detect(event).map(|detection| (rule, detection)))
     }
 }
 

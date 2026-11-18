@@ -1,8 +1,8 @@
 //! The indicator matcher of tier 1.
 //!
 //! An [`IocStore`] holds indicators of compromise: IP addresses and networks, DNS domains,
-//! user agents, and application identifiers. The store is a [`Detector`]. It returns one
-//! detection for each indicator that an event matches.
+//! user agents, application identifiers, and client fingerprints. The store is a
+//! [`Detector`]. It returns one detection for each indicator that an event matches.
 //!
 //! Each lookup is a hash lookup or a prefix lookup. The cost for one event does not grow
 //! with the number of indicators.
@@ -17,14 +17,15 @@ use aegis_contracts::event::{Event, attr};
 use aegis_contracts::{AttackTechnique, Detection, DetectionTier, Detector, Result, Verdict};
 use aho_corasick::AhoCorasick;
 use async_trait::async_trait;
+use chrono::{DateTime, TimeDelta, Utc};
 use ipnet::IpNet;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::attack::techniques_from_tags;
 use crate::common::{
-    canonical_ip, default_verdict, detection_id, event_entities, event_tenant, ip_entity,
-    push_entity,
+    CLIENT_FINGERPRINT_PREFIX, canonical_ip, default_verdict, detection_id, event_entities,
+    event_tenant, fingerprint_token, ip_entity, push_entity,
 };
 use crate::error::{DetectError, yaml_reason};
 use crate::files::read_text;
@@ -60,6 +61,9 @@ pub enum IndicatorKind {
     UserAgent,
     /// An application (client) identifier. The comparison ignores case.
     AppId,
+    /// A client fingerprint: the attribute `client_fingerprint` of an event. The
+    /// comparison ignores ASCII case.
+    ClientFingerprint,
 }
 
 impl IndicatorKind {
@@ -71,6 +75,7 @@ impl IndicatorKind {
             Self::Domain => "domain",
             Self::UserAgent => "user_agent",
             Self::AppId => "app_id",
+            Self::ClientFingerprint => "client_fingerprint",
         }
     }
 }
@@ -82,8 +87,8 @@ pub struct Indicator {
     /// The type of the indicator.
     #[serde(rename = "type")]
     pub kind: IndicatorKind,
-    /// The value: an address, a network, a domain, a part of a user agent, or an
-    /// application identifier.
+    /// The value: an address, a network, a domain, a part of a user agent, an application
+    /// identifier, or a client fingerprint.
     pub value: String,
     /// What the indicator shows, and where it comes from.
     pub description: String,
@@ -99,12 +104,88 @@ pub struct Indicator {
     /// The rule identifier of a match. The default is `ioc:{type}:{value}`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
+    /// The time at which the source saw the value for the first time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_seen: Option<DateTime<Utc>>,
+    /// The time at which the source saw the value for the last time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_seen: Option<DateTime<Utc>>,
+    /// A note that says where the indicator comes from, for example `aegis decoy export`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    /// The time in seconds in which the engine makes one detection for this indicator,
+    /// one matched value, and one actor. The engine counts the other matches. With no
+    /// value, each event that matches gives a detection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suppress_seconds: Option<u64>,
 }
 
-#[derive(Deserialize)]
+impl Indicator {
+    /// Makes an indicator with the necessary fields. All other fields are empty.
+    pub fn new(
+        kind: IndicatorKind,
+        value: impl Into<String>,
+        description: impl Into<String>,
+        severity: Severity,
+    ) -> Self {
+        Self {
+            kind,
+            value: value.into(),
+            description: description.into(),
+            severity,
+            tags: Vec::new(),
+            verdict: None,
+            id: None,
+            first_seen: None,
+            last_seen: None,
+            source: None,
+            suppress_seconds: None,
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct IndicatorFile {
     indicators: Vec<Indicator>,
+}
+
+/// Writes indicators as the YAML text of an indicator file.
+///
+/// [`indicators_from_yaml`] reads the text again.
+///
+/// # Errors
+///
+/// Returns [`DetectError::Indicator`] with the file name `origin` if the indicators cannot
+/// be written as YAML.
+pub fn indicators_to_yaml(
+    indicators: &[Indicator],
+    origin: &str,
+) -> std::result::Result<String, DetectError> {
+    let file = IndicatorFile {
+        indicators: indicators.to_vec(),
+    };
+    serde_saphyr::to_string(&file)
+        .map_err(|error| DetectError::indicator(origin, format!("cannot write YAML: {error}")))
+}
+
+/// Writes indicators as the JSON text of an indicator file.
+///
+/// [`indicators_from_json`] reads the text again.
+///
+/// # Errors
+///
+/// Returns [`DetectError::Indicator`] with the file name `origin` if the indicators cannot
+/// be written as JSON.
+pub fn indicators_to_json(
+    indicators: &[Indicator],
+    origin: &str,
+) -> std::result::Result<String, DetectError> {
+    let file = IndicatorFile {
+        indicators: indicators.to_vec(),
+    };
+    serde_json::to_string_pretty(&file)
+        .map_err(|error| DetectError::indicator(origin, format!("cannot write JSON: {error}")))
 }
 
 /// Reads indicators from YAML text. The text is a map with the list `indicators`.
@@ -170,6 +251,8 @@ struct Entry {
     rule_id: String,
     verdict: Verdict,
     attack: Vec<AttackTechnique>,
+    /// The suppression window of the indicator.
+    suppress: Option<TimeDelta>,
 }
 
 /// One match of an event value with an indicator.
@@ -192,6 +275,7 @@ pub struct IocStore {
     v6: PrefixTable<u128>,
     domains: HashMap<String, Vec<usize>>,
     app_ids: HashMap<String, Vec<usize>>,
+    fingerprints: HashMap<String, Vec<usize>>,
     user_agents: Option<AhoCorasick>,
     /// The entry for each pattern of `user_agents`.
     user_agent_entries: Vec<usize>,
@@ -258,6 +342,8 @@ impl IocStore {
     /// - is a network that contains all addresses;
     /// - is a user agent shorter than [`MIN_USER_AGENT_LENGTH`];
     /// - has the verdict `benign`;
+    /// - has a `first_seen` time after its `last_seen` time;
+    /// - has an empty `source`, or a `suppress_seconds` of zero;
     /// - has the same type and value as an earlier indicator.
     pub fn with_origin(
         indicators: Vec<Indicator>,
@@ -282,6 +368,35 @@ impl IocStore {
                     "the indicator {value:?} has the verdict benign; use malicious or suspicious"
                 )));
             }
+            if let (Some(first), Some(last)) = (indicator.first_seen, indicator.last_seen)
+                && first > last
+            {
+                return Err(fail(format!(
+                    "the indicator {value:?} has a first_seen time after its last_seen time"
+                )));
+            }
+            if indicator
+                .source
+                .as_deref()
+                .is_some_and(|source| source.trim().is_empty())
+            {
+                return Err(fail(format!("the indicator {value:?} has an empty source")));
+            }
+            let suppress = match indicator.suppress_seconds {
+                None => None,
+                Some(seconds) => Some(
+                    i64::try_from(seconds)
+                        .ok()
+                        .filter(|seconds| *seconds > 0)
+                        .and_then(TimeDelta::try_seconds)
+                        .ok_or_else(|| {
+                            fail(format!(
+                                "the indicator {value:?} has a suppress_seconds of {seconds}; \
+                                 use 1 or more"
+                            ))
+                        })?,
+                ),
+            };
             let entry = store.entries.len();
             let normal = match indicator.kind {
                 IndicatorKind::Ip => {
@@ -337,6 +452,16 @@ impl IocStore {
                     store.app_ids.entry(app_id.clone()).or_default().push(entry);
                     app_id
                 }
+                IndicatorKind::ClientFingerprint => {
+                    let token = fingerprint_token(value)
+                        .ok_or_else(|| fail("the value is empty".to_owned()))?;
+                    store
+                        .fingerprints
+                        .entry(token.clone())
+                        .or_default()
+                        .push(entry);
+                    token
+                }
             };
             if !seen.insert((indicator.kind, normal.clone())) {
                 return Err(fail(format!(
@@ -356,6 +481,7 @@ impl IocStore {
                 attack: techniques_from_tags(&indicator.tags),
                 rule_id,
                 normal,
+                suppress,
                 indicator,
             });
         }
@@ -454,6 +580,26 @@ impl IocStore {
         }
     }
 
+    fn fingerprint_hits<'a>(&self, text: &'a str, hits: &mut Vec<Hit<'a>>) {
+        if self.fingerprints.is_empty() {
+            return;
+        }
+        let Some(token) = fingerprint_token(text) else {
+            return;
+        };
+        for entry in self.fingerprints.get(&token).into_iter().flatten() {
+            hits.push(Hit {
+                entry: *entry,
+                field: "attributes.client_fingerprint",
+                value: Cow::Owned(token.clone()),
+                entity: Some(EntityRef::new(
+                    EntityKind::Other,
+                    format!("{CLIENT_FINGERPRINT_PREFIX}{token}"),
+                )),
+            });
+        }
+    }
+
     fn user_agent_hits<'a>(&self, text: &'a str, hits: &mut Vec<Hit<'a>>) {
         let Some(automaton) = &self.user_agents else {
             return;
@@ -482,8 +628,21 @@ impl IocStore {
     /// | `domain` | `attributes.destination_domain`, and the target if it is a domain |
     /// | `user_agent` | `actor.user_agent` |
     /// | `app_id` | `attributes.app_id`, and the actor and the target if they are applications |
+    /// | `client_fingerprint` | `attributes.client_fingerprint` |
+    ///
+    /// The store keeps no state, so it does not apply `suppress_seconds`. The
+    /// [`DetectionEngine`](crate::engine::DetectionEngine) applies it.
     #[must_use]
     pub fn evaluate(&self, event: &Event) -> Vec<Detection> {
+        self.matches(event)
+            .into_iter()
+            .map(|(_, detection)| detection)
+            .collect()
+    }
+
+    /// Returns one detection for each indicator that the event matches, with the
+    /// suppression window of the indicator.
+    pub(crate) fn matches(&self, event: &Event) -> Vec<(Option<TimeDelta>, Detection)> {
         if self.entries.is_empty() {
             return Vec::new();
         }
@@ -516,6 +675,9 @@ impl IocStore {
         if let Some(user_agent) = event.actor.user_agent.as_deref() {
             self.user_agent_hits(user_agent, &mut hits);
         }
+        if let Some(fingerprint) = event.attribute_str(attr::CLIENT_FINGERPRINT) {
+            self.fingerprint_hits(fingerprint, &mut hits);
+        }
         if hits.is_empty() {
             return Vec::new();
         }
@@ -526,7 +688,7 @@ impl IocStore {
         hits.into_iter()
             .filter_map(|hit| {
                 let entry = self.entries.get(hit.entry)?;
-                Some(detection(entry, event, hit))
+                Some((entry.suppress, detection(entry, event, hit)))
             })
             .collect()
     }
@@ -606,6 +768,10 @@ mod tests {
             ],
             verdict: None,
             id: None,
+            first_seen: None,
+            last_seen: None,
+            source: None,
+            suppress_seconds: None,
         }
     }
 
@@ -1092,6 +1258,159 @@ indicators:
         let detections = store.inspect(&event("203.0.113.200")).await.unwrap();
         assert_eq!(detections.len(), 1);
         assert_eq!(store.inspect(&event("203.0.113.9")).await.unwrap(), []);
+    }
+
+    #[test]
+    fn a_client_fingerprint_indicator_matches_the_attribute_of_the_event() {
+        let store = store(vec![indicator(
+            IndicatorKind::ClientFingerprint,
+            "FP-7c1d09",
+        )]);
+        let with = |fingerprint: &str| {
+            event("203.0.113.9").with_attribute(attr::CLIENT_FINGERPRINT, fingerprint)
+        };
+        let detections = store.evaluate(&with("fp-7C1D09"));
+        assert_eq!(detections.len(), 1);
+        let found = &detections[0];
+        assert_eq!(found.rule_id, "ioc:client_fingerprint:fp-7c1d09");
+        assert_eq!(found.title, "Indicator match: client_fingerprint fp-7c1d09");
+        assert_eq!(
+            found.attributes["matched_field"],
+            json!("attributes.client_fingerprint")
+        );
+        assert_eq!(found.attributes["matched_value"], json!("fp-7c1d09"));
+        // The fingerprint is an entity of the kind `other`, one time.
+        let fingerprints: Vec<&EntityRef> = found
+            .entities
+            .iter()
+            .filter(|entity| entity.kind == EntityKind::Other)
+            .collect();
+        assert_eq!(
+            fingerprints,
+            [&EntityRef::new(
+                EntityKind::Other,
+                "client_fingerprint:fp-7c1d09"
+            )]
+        );
+
+        assert_eq!(rule_ids(&store, &with("fp-7c1d0")), Vec::<String>::new());
+        assert_eq!(rule_ids(&store, &with("fp-7c1d099")), Vec::<String>::new());
+        assert_eq!(
+            rule_ids(&store, &event("203.0.113.9")),
+            Vec::<String>::new()
+        );
+        // A fingerprint that is not a text is not examined.
+        let number = event("203.0.113.9").with_attribute(attr::CLIENT_FINGERPRINT, 7);
+        assert_eq!(rule_ids(&store, &number), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_long_fingerprint_matches_through_its_digest() {
+        let long = "f".repeat(300);
+        let store = store(vec![indicator(IndicatorKind::ClientFingerprint, &long)]);
+        let token = fingerprint_token(&long).unwrap();
+        assert!(token.starts_with("sha256:"), "{token}");
+        let from_event = event("203.0.113.9").with_attribute(attr::CLIENT_FINGERPRINT, long);
+        assert_eq!(
+            rule_ids(&store, &from_event),
+            [format!("ioc:client_fingerprint:{token}")]
+        );
+        // An indicator with the digest form matches the same event.
+        let by_token = self::store(vec![indicator(IndicatorKind::ClientFingerprint, &token)]);
+        assert_eq!(rule_ids(&by_token, &from_event).len(), 1);
+    }
+
+    #[test]
+    fn the_times_the_source_and_the_suppression_time_are_checked() {
+        let at = |seconds: i64| DateTime::from_timestamp(1_793_696_400 + seconds, 0);
+        let mut reversed = indicator(IndicatorKind::Ip, "192.0.2.1");
+        reversed.first_seen = at(10);
+        reversed.last_seen = at(5);
+        assert_eq!(
+            reason(vec![reversed]),
+            "indicator 1: the indicator \"192.0.2.1\" has a first_seen time after its \
+             last_seen time"
+        );
+        let mut no_source = indicator(IndicatorKind::Ip, "192.0.2.1");
+        no_source.source = Some("  ".to_owned());
+        assert_eq!(
+            reason(vec![no_source]),
+            "indicator 1: the indicator \"192.0.2.1\" has an empty source"
+        );
+        for seconds in [0, u64::MAX] {
+            let mut zero = indicator(IndicatorKind::Ip, "192.0.2.1");
+            zero.suppress_seconds = Some(seconds);
+            assert_eq!(
+                reason(vec![zero]),
+                format!(
+                    "indicator 1: the indicator \"192.0.2.1\" has a suppress_seconds of \
+                     {seconds}; use 1 or more"
+                )
+            );
+        }
+
+        // Equal times, one time alone, a source, and a suppression time are valid.
+        let mut valid = indicator(IndicatorKind::Ip, "192.0.2.1");
+        valid.first_seen = at(5);
+        valid.last_seen = at(5);
+        valid.source = Some("a feed".to_owned());
+        valid.suppress_seconds = Some(60);
+        let mut only_last = indicator(IndicatorKind::Ip, "192.0.2.2");
+        only_last.last_seen = at(5);
+        let store = store(vec![valid, only_last]);
+        assert_eq!(store.len(), 2);
+        let matches = store.matches(&event("192.0.2.1"));
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].0, Some(TimeDelta::seconds(60)));
+        let matches = store.matches(&event("192.0.2.2"));
+        assert_eq!(matches[0].0, None);
+    }
+
+    #[test]
+    fn an_indicator_file_with_the_optional_keys_round_trips_as_yaml_and_as_json() {
+        let text = "indicators:\n  - type: client_fingerprint\n    value: fp-1\n    \
+                    description: A client.\n    severity: medium\n    first_seen: \
+                    \"2026-01-05T08:00:00Z\"\n    last_seen: 2026-01-06T17:30:00Z\n    source: \
+                    a decoy\n    suppress_seconds: 3600\n  - type: ip\n    value: 192.0.2.1\n    \
+                    description: An address.\n    severity: high\n";
+        let indicators = indicators_from_yaml(text, "a.yml").unwrap();
+        assert_eq!(indicators.len(), 2);
+        let first = &indicators[0];
+        assert_eq!(first.kind, IndicatorKind::ClientFingerprint);
+        assert_eq!(
+            first.first_seen.map(|time| time.to_rfc3339()).as_deref(),
+            Some("2026-01-05T08:00:00+00:00")
+        );
+        assert_eq!(
+            first.last_seen.map(|time| time.to_rfc3339()).as_deref(),
+            Some("2026-01-06T17:30:00+00:00")
+        );
+        assert_eq!(first.source.as_deref(), Some("a decoy"));
+        assert_eq!(first.suppress_seconds, Some(3_600));
+        assert_eq!(
+            indicators[1],
+            Indicator::new(
+                IndicatorKind::Ip,
+                "192.0.2.1",
+                "An address.",
+                Severity::High
+            )
+        );
+
+        let yaml = indicators_to_yaml(&indicators, "out.yml").unwrap();
+        assert_eq!(indicators_from_yaml(&yaml, "out.yml").unwrap(), indicators);
+        // An indicator with no optional key writes none of them.
+        assert_eq!(yaml.matches("first_seen").count(), 1);
+        assert_eq!(yaml.matches("suppress_seconds").count(), 1);
+        let json = indicators_to_json(&indicators, "out.json").unwrap();
+        assert_eq!(indicators_from_json(&json, "out.json").unwrap(), indicators);
+
+        let bad_time = text.replace("2026-01-06T17:30:00Z", "yesterday");
+        let error = indicators_from_yaml(&bad_time, "a.yml").unwrap_err();
+        assert!(
+            matches!(&error, DetectError::Indicator { file, .. } if file == "a.yml"),
+            "{error}"
+        );
     }
 
     #[test]

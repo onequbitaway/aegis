@@ -1,19 +1,21 @@
 //! The state of the API: the services that the API reads and drives.
 
+use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Arc;
+use std::time::Duration;
 
 use aegis_agents::AgentRuntime;
 use aegis_contracts::action::ActionDisposition;
 use aegis_contracts::audit::AuditLog;
 use aegis_contracts::bus::MessageBus;
-use aegis_contracts::common::ApprovalId;
+use aegis_contracts::common::{ActionId, ApprovalId};
 use aegis_contracts::graph::DefensiveGraph;
 use aegis_contracts::incident::IncidentStore;
 use aegis_contracts::policy::{ApprovalQueue, ApprovalRequest, Principal};
 use aegis_core::ModuleSet;
 use aegis_policy::Rbac;
-use aegis_respond::PlaybookEngine;
+use aegis_respond::{PendingRevert, PlaybookEngine};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
@@ -72,6 +74,115 @@ pub trait ApprovalActions: Send + Sync {
     ) -> aegis_contracts::Result<ApprovalDecision>;
 }
 
+/// The path by which a person decides a timed revert, and reverts an action.
+///
+/// The composition root implements this trait. The implementation checks the permission
+/// of the principal again, writes each audit record with the principal, and sends each
+/// revert through the dispatcher: the policy, the approval queue, and the audit log. This
+/// crate only calls it, after it identified the principal and checked
+/// [`Permission::ApproveActions`](aegis_policy::Permission).
+///
+/// A state with no implementation has no timed revert: the list is empty, and each other
+/// route answers with the status 501.
+#[async_trait]
+pub trait RevertActions: Send + Sync {
+    /// Returns `true` if the process holds timed reverts.
+    fn enabled(&self) -> bool;
+
+    /// Lists the timed reverts that wait. The revert with the earliest time is first.
+    ///
+    /// # Errors
+    ///
+    /// An implementation returns the error of its store.
+    async fn pending(&self) -> aegis_contracts::Result<Vec<PendingRevert>>;
+
+    /// Confirms the action `action_id`. The containment stays.
+    ///
+    /// # Errors
+    ///
+    /// An implementation returns [`Error::NotFound`](aegis_contracts::Error::NotFound) if
+    /// the action has no pending revert, and
+    /// [`Error::Unauthorized`](aegis_contracts::Error::Unauthorized) if the principal is
+    /// not a person or has no permission.
+    async fn confirm(
+        &self,
+        action_id: ActionId,
+        principal: &Principal,
+    ) -> aegis_contracts::Result<PendingRevert>;
+
+    /// Moves the revert time of the action `action_id` by `extension`.
+    ///
+    /// # Errors
+    ///
+    /// The errors of [`RevertActions::confirm`], and
+    /// [`Error::InvalidInput`](aegis_contracts::Error::InvalidInput) for an extension
+    /// that is not permitted.
+    async fn extend(
+        &self,
+        action_id: ActionId,
+        principal: &Principal,
+        extension: Duration,
+    ) -> aegis_contracts::Result<PendingRevert>;
+
+    /// Reverts the action `action_id` immediately, before its revert time.
+    ///
+    /// # Errors
+    ///
+    /// An implementation returns [`Error::NotFound`](aegis_contracts::Error::NotFound) if
+    /// the action has no pending revert, and the error of the revert.
+    async fn cancel(
+        &self,
+        action_id: ActionId,
+        principal: &Principal,
+    ) -> aegis_contracts::Result<ActionDisposition>;
+
+    /// Reverts one action that a connector did before, with or without a timed revert.
+    ///
+    /// # Errors
+    ///
+    /// An implementation returns [`Error::NotFound`](aegis_contracts::Error::NotFound) if
+    /// the audit log has no execution of the action, and
+    /// [`Error::InvalidInput`](aegis_contracts::Error::InvalidInput) if the action cannot
+    /// be reverted, for example because it was a dry run.
+    async fn revert(
+        &self,
+        action_id: ActionId,
+        principal: &Principal,
+        reason: &str,
+    ) -> aegis_contracts::Result<ActionDisposition>;
+}
+
+/// The counts of the flood protection of the detection engine, for the status route.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FloodStatus {
+    /// The rule and indicator matches that gave no detection.
+    pub suppressed_matches: u64,
+    /// The detections for a rule that matched many times for one key.
+    pub repeat_detections: u64,
+    /// The `suspicious` detections that got no model request.
+    pub triage_quota_denials: u64,
+    /// The incident states that a newer state of the same incident replaced.
+    pub coalesced_incident_updates: u64,
+}
+
+/// The data of the composition root that the status route shows.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct SystemStatus {
+    /// The counts of the flood protection, from the start of the process.
+    pub flood: FloodStatus,
+    /// More fields of the status document: the name of the field and its value. A name
+    /// that the status document already has is not used.
+    #[serde(flatten)]
+    pub sections: BTreeMap<String, serde_json::Value>,
+}
+
+/// Gives the status route the data that only the composition root has.
+#[async_trait]
+pub trait StatusSource: Send + Sync {
+    /// Returns the data of this time.
+    async fn status(&self) -> SystemStatus;
+}
+
 /// The services that make an [`ApiState`].
 ///
 /// Tests fill this structure with the in-memory services of the test kit. The composition
@@ -105,6 +216,8 @@ pub struct ApiParts {
 pub struct ApiState {
     parts: Arc<ApiParts>,
     env: EnvLookup,
+    reverts: Option<Arc<dyn RevertActions>>,
+    status: Option<Arc<dyn StatusSource>>,
 }
 
 impl ApiState {
@@ -114,7 +227,26 @@ impl ApiState {
         Self {
             parts: Arc::new(parts),
             env: Arc::new(process_env),
+            reverts: None,
+            status: None,
         }
+    }
+
+    /// Sets the path for timed reverts and for the revert of an action.
+    ///
+    /// Without it, the API has no timed revert. Refer to [`RevertActions`].
+    #[must_use]
+    pub fn with_reverts(mut self, reverts: Arc<dyn RevertActions>) -> Self {
+        self.reverts = Some(reverts);
+        self
+    }
+
+    /// Sets the source of the data that only the composition root has. The status route
+    /// then shows the flood counters.
+    #[must_use]
+    pub fn with_status(mut self, status: Arc<dyn StatusSource>) -> Self {
+        self.status = Some(status);
+        self
     }
 
     /// Sets the function that returns the value of an environment variable.
@@ -138,6 +270,16 @@ impl ApiState {
     /// Returns the function that reads an environment variable.
     pub(crate) fn env(&self) -> &EnvLookup {
         &self.env
+    }
+
+    /// Returns the path for timed reverts, if the state has one.
+    pub(crate) fn reverts(&self) -> Option<&Arc<dyn RevertActions>> {
+        self.reverts.as_ref()
+    }
+
+    /// Returns the source of the status data, if the state has one.
+    pub(crate) fn status(&self) -> Option<&Arc<dyn StatusSource>> {
+        self.status.as_ref()
     }
 }
 

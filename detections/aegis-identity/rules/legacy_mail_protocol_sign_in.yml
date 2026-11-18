@@ -38,3 +38,11 @@ level: medium
 tags:
   - attack.initial-access
   - attack.t1078.004
+# A mail client signs in again and again. One account, one address, and one protocol give
+# one detection in one hour.
+aegis.suppress:
+  window_seconds: 3600
+  fields:
+    - actor.id
+    - actor.ip
+    - auth_protocol

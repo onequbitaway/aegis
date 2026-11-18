@@ -17,6 +17,31 @@
 //! The receiver must compute the same HMAC with the shared secret and compare the values in
 //! constant time. The receiver must also refuse a timestamp that is too old. Use
 //! [`verify_signature`] in a receiver that you write in Rust.
+//!
+//! # Revert
+//!
+//! `revert` sends the same document with the operation `revert` to an endpoint that the
+//! configuration marks `reversible`. When the dispatcher reverts an action, the action in
+//! the document has one more parameter, `execution_details`: the details of the outcome of
+//! the execution. `execution_details.external_reference` is the `id` and the `url` that the
+//! receiver returned for the execution, so the receiver can find its own work item.
+//!
+//! # Friction: `raise_friction`
+//!
+//! The custom action [`RAISE_FRICTION`](crate::friction::RAISE_FRICTION) is a friction
+//! action for the controls of the operator. Refer to [`friction`]. Point
+//! its endpoint at an automation that you own, for example an automation that turns on a
+//! strict conditional-access policy or a change freeze.
+//!
+//! - On the operation `execute`, the receiver raises the control.
+//! - On the operation `revert`, the receiver puts the control in its earlier state.
+//!
+//! The connector sends the parameters of the request and does not read them. The samples
+//! use `control` for the name of the control and `level` for its level. Refer to
+//! [`friction::parameter`].
+//!
+//! A friction action must be reversible. The connector refuses a configuration with an
+//! endpoint for a friction action that does not have `reversible: true`.
 
 use std::fmt;
 use std::time::Duration;
@@ -38,6 +63,7 @@ use sha2::Sha256;
 use url::Url;
 
 use super::http;
+use crate::friction;
 use crate::names::{entity_label, snake_name, truncate};
 
 /// The header that holds the signature of the request.
@@ -212,8 +238,9 @@ impl WebhookConnector {
     /// Makes a connector.
     ///
     /// Returns [`Error::Config`] if the name is empty, the secret is too short, no endpoint
-    /// is set, an action type has two endpoints, or a URL is not safe. A URL must use
-    /// `https`. Plain `http` is permitted only for a loopback host.
+    /// is set, an action type has two endpoints, a URL is not safe, or the endpoint of a
+    /// friction action is not reversible. A URL must use `https`. Plain `http` is permitted
+    /// only for a loopback host.
     pub fn new(config: WebhookConfig) -> Result<Self> {
         let name = config.name.trim();
         if name.is_empty() {
@@ -242,6 +269,11 @@ impl WebhookConnector {
             if endpoints.iter().any(|known| known.kind == endpoint.kind) {
                 return Err(Error::Config(format!(
                     "webhook connector {name} has two endpoints for the action {kind}"
+                )));
+            }
+            if friction::is_friction(&endpoint.kind) && !endpoint.reversible {
+                return Err(Error::Config(format!(
+                    "the endpoint of webhook connector {name} for the friction action {kind} must have reversible = true; a friction action must have an inverse"
                 )));
             }
             let what = format!("the endpoint of webhook connector {name} for the action {kind}");

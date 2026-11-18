@@ -49,14 +49,25 @@
 //! | `reason` | A template for the reason of the request. |
 //! | `continue_on_error` | With `true`, a failure of this step does not stop the playbook. The default is `false`. |
 //! | `max_targets` | The maximum number of targets. A step with more targets fails and sends no request. The default is 20. |
+//! | `revert_after` | The time of a timed revert: a number of seconds, or a number with the unit `s`, `m`, `h`, or `d`, for example `4h`. Only an action with an inverse can have it. |
 //!
 //! The engine documentation lists the template variables. Refer to [`PlaybookEngine`].
+//!
+//! # Timed revert
+//!
+//! A step with `revert_after` asks for a timed revert. The engine sets the request
+//! parameter `revert_after_seconds`. The action then reverts at that time, unless a person
+//! confirms it before. Refer to [`revert`].
+//!
+//! Use `revert_after` for a containment action that has a cost when it is wrong, for
+//! example `disable_user`, `block_ip`, or a friction action.
 
 mod draft;
 mod engine;
 mod template;
 
 use std::collections::BTreeMap;
+use std::time::Duration;
 
 use aegis_contracts::Error;
 use aegis_contracts::action::ActionKind;
@@ -66,14 +77,17 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub use draft::{
-    DEFAULT_MAX_DRAFT_STEPS, DraftError, DraftOptions, draft_response, draft_response_with,
+    DEFAULT_FRICTION_REVERT_AFTER, DEFAULT_MAX_DRAFT_STEPS, DraftError, DraftOptions,
+    draft_response, draft_response_with,
 };
 pub use engine::{
     DRAFT_PRINCIPAL_ID, LoadReport, PLAYBOOK_PRINCIPAL_ID, PlaybookEngine, PlaybookRun, RunMode,
     StepResult, StepRun,
 };
 
+use crate::friction;
 use crate::names::snake_name;
+use crate::revert::{self, EXECUTION_DETAILS_PARAMETER, REVERT_ACTION, REVERT_AFTER_PARAMETER};
 
 /// The maximum number of steps in one playbook.
 pub const MAX_STEPS: usize = 32;
@@ -193,6 +207,10 @@ pub(crate) fn permitted_target_kinds(action: &ActionKind) -> Option<&'static [En
         ActionKind::IsolateHost => Some(&[EntityKind::Host, EntityKind::Device]),
         ActionKind::BlockIp => Some(&[EntityKind::IpAddress]),
         ActionKind::RotateSecret => Some(&[EntityKind::Secret]),
+        // This friction action changes a setting of the tenant.
+        ActionKind::Custom(name) if name == friction::RESTRICT_USER_CONSENT => {
+            Some(&[EntityKind::Tenant])
+        }
         ActionKind::Enrich
         | ActionKind::Tag
         | ActionKind::Notify
@@ -292,6 +310,12 @@ pub struct Step {
     pub(crate) reason: String,
     pub(crate) continue_on_error: bool,
     pub(crate) max_targets: usize,
+    /// The time of the timed revert, in seconds.
+    #[serde(
+        rename = "revert_after_seconds",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub(crate) revert_after: Option<u64>,
     /// With `true`, the reason and the parameters are plain text and not templates.
     #[serde(skip)]
     pub(crate) literal: bool,
@@ -338,6 +362,14 @@ impl Step {
     #[must_use]
     pub fn max_targets(&self) -> usize {
         self.max_targets
+    }
+
+    /// Returns the time of the timed revert of the step, if the step has one.
+    ///
+    /// Each request of the step has this time in the parameter `revert_after_seconds`.
+    #[must_use]
+    pub fn revert_after(&self) -> Option<Duration> {
+        self.revert_after.map(Duration::from_secs)
     }
 }
 
@@ -394,6 +426,8 @@ struct RawStep {
     continue_on_error: bool,
     #[serde(default)]
     max_targets: Option<usize>,
+    #[serde(default)]
+    revert_after: Option<Value>,
 }
 
 /// Returns `true` if `text` is a name: lower-case letters, digits, `-`, and `_`.
@@ -486,6 +520,11 @@ fn validate_step(position: usize, raw: RawStep) -> Result<Step, String> {
                 .to_owned(),
         ));
     }
+    if matches!(&raw.action, ActionKind::Custom(name) if name == REVERT_ACTION) {
+        return Err(fail(format!(
+            "the custom action {REVERT_ACTION} is reserved; a playbook cannot revert an action"
+        )));
+    }
     if let TargetSelector::Fixed(entity) = &raw.target
         && entity.id.trim().is_empty()
     {
@@ -500,8 +539,28 @@ fn validate_step(position: usize, raw: RawStep) -> Result<Step, String> {
     }
     template::check(&reason).map_err(|error| fail(format!("reason: {error}")))?;
     for (name, value) in &raw.parameters {
+        if name == REVERT_AFTER_PARAMETER {
+            return Err(fail(format!(
+                "parameter {name}: use the step field revert_after for a timed revert"
+            )));
+        }
+        if name == EXECUTION_DETAILS_PARAMETER {
+            return Err(fail(format!(
+                "parameter {name}: the name is reserved for the dispatcher"
+            )));
+        }
         template::check_value(value).map_err(|error| fail(format!("parameter {name}: {error}")))?;
     }
+    let revert_after = match &raw.revert_after {
+        Some(value) => {
+            let seconds = revert::parse_revert_after(value)
+                .map_err(|error| fail(format!("revert_after: {error}")))?;
+            revert::check_kind(&raw.action)
+                .map_err(|error| fail(format!("revert_after: {error}")))?;
+            Some(seconds)
+        }
+        None => None,
+    };
     let max_targets = raw.max_targets.unwrap_or(DEFAULT_MAX_TARGETS);
     if !(1..=MAX_TARGETS_LIMIT).contains(&max_targets) {
         return Err(fail(format!(
@@ -516,6 +575,7 @@ fn validate_step(position: usize, raw: RawStep) -> Result<Step, String> {
         reason,
         continue_on_error: raw.continue_on_error,
         max_targets,
+        revert_after,
         literal: false,
     })
 }
@@ -999,6 +1059,120 @@ steps:
                 .len(),
             MAX_STEPS
         );
+    }
+
+    #[test]
+    fn a_step_reads_its_timed_revert() {
+        let yaml = VALID.replace(
+            "    max_targets: 5\n",
+            "    max_targets: 5\n    revert_after: 4h\n",
+        );
+        let playbook = Playbook::from_yaml("block.yaml", &yaml).unwrap();
+        assert_eq!(
+            playbook.steps()[0].revert_after(),
+            Some(Duration::from_secs(14_400))
+        );
+        assert_eq!(playbook.steps()[1].revert_after(), None);
+        let value = serde_json::to_value(&playbook).unwrap();
+        assert_eq!(value["steps"][0]["revert_after_seconds"], json!(14_400));
+        assert_eq!(value["steps"][1].get("revert_after_seconds"), None);
+
+        // A number is a number of seconds.
+        let seconds = VALID.replace(
+            "    max_targets: 5\n",
+            "    max_targets: 5\n    revert_after: 900\n",
+        );
+        let playbook = Playbook::from_yaml("block.yaml", &seconds).unwrap();
+        assert_eq!(
+            playbook.steps()[0].revert_after(),
+            Some(Duration::from_secs(900))
+        );
+
+        // A custom action can have a timed revert. The connector decides if it has an inverse.
+        let custom = VALID.replace(
+            "    reason: Quarantine.",
+            "    revert_after: 30m\n    reason: Quarantine.",
+        );
+        let playbook = Playbook::from_yaml("block.yaml", &custom).unwrap();
+        assert_eq!(
+            playbook.steps()[2].revert_after(),
+            Some(Duration::from_secs(1_800))
+        );
+    }
+
+    #[test]
+    fn a_timed_revert_that_is_not_valid_is_rejected() {
+        let with = |value: &str| {
+            VALID.replace(
+                "    max_targets: 5\n",
+                &format!("    max_targets: 5\n    revert_after: {value}\n"),
+            )
+        };
+        assert_eq!(
+            reason_of(&with("4 hours")),
+            "step block-address: revert_after: the revert time \"4 hours\" is not valid; use a number of seconds, or a number with the unit s, m, h, or d, for example 4h"
+        );
+        assert_eq!(
+            reason_of(&with("0")),
+            "step block-address: revert_after: the revert time must be 1 to 2592000 seconds, not 0"
+        );
+        assert_eq!(
+            reason_of(&with("31d")),
+            "step block-address: revert_after: the revert time must be 1 to 2592000 seconds, not 2678400"
+        );
+
+        // An action with no inverse cannot have a timed revert.
+        let notify = VALID.replace(
+            "  - action: notify\n",
+            "  - action: notify\n    revert_after: 4h\n",
+        );
+        assert_eq!(
+            reason_of(&notify),
+            "step step-2: revert_after: the action notify has no inverse, so it cannot have a timed revert"
+        );
+
+        // The step field is the only way to set the timed revert.
+        let parameter = VALID.replace("duration_hours: 24", "revert_after_seconds: 600");
+        assert_eq!(
+            reason_of(&parameter),
+            "step block-address: parameter revert_after_seconds: use the step field revert_after for a timed revert"
+        );
+        let reserved = VALID.replace("duration_hours: 24", "execution_details: {}");
+        assert_eq!(
+            reason_of(&reserved),
+            "step block-address: parameter execution_details: the name is reserved for the dispatcher"
+        );
+    }
+
+    #[test]
+    fn the_revert_action_is_reserved_and_consent_friction_needs_the_tenant() {
+        let revert = VALID.replace("custom: quarantine_mailbox", "custom: revert");
+        assert_eq!(
+            reason_of(&revert),
+            "step step-3: the custom action revert is reserved; a playbook cannot revert an action"
+        );
+
+        let friction = VALID.replace(
+            "custom: quarantine_mailbox",
+            "custom: restrict_user_consent",
+        );
+        let playbook = Playbook::from_yaml("block.yaml", &friction).unwrap();
+        assert_eq!(
+            playbook.steps()[2].action(),
+            &ActionKind::Custom("restrict_user_consent".to_owned())
+        );
+        let on_address = VALID.replace(
+            "action: block_ip",
+            "action:\n      custom: restrict_user_consent",
+        );
+        assert_eq!(
+            reason_of(&on_address),
+            "step block-address: the action custom:restrict_user_consent needs a target of the type tenant, not ip_address"
+        );
+        // The other friction action is for a control of the operator, with a target of any
+        // type.
+        let raise = VALID.replace("action: block_ip", "action:\n      custom: raise_friction");
+        assert!(Playbook::from_yaml("block.yaml", &raise).is_ok());
     }
 
     #[test]

@@ -8,6 +8,8 @@
 //! | [`PrivilegedSelfAssignment`] | A workload identity gives itself a privileged role | T1098.003 |
 //! | [`CredentialAfterGrant`] | A new application credential immediately after a grant | T1098.001 |
 //! | [`ImpossibleSpeed`] | One principal in two distant places, or two tenants, in seconds | T1078.004 |
+//! | [`MachineCadence`] | A chain of different sensitive actions at the speed of a machine | T1059.009 |
+//! | [`EndpointProbe`] | One client that asks for many paths that do not exist, or for a decoy path | T1595.003 |
 //!
 //! # Time
 //!
@@ -34,15 +36,25 @@ use crate::common::{detection_id, event_tenant};
 use crate::error::DetectError;
 
 mod burst;
+mod cadence;
 mod credential;
+mod probe;
 mod self_assign;
 mod speed;
 
 pub use burst::{
     SIGN_IN_AFTER_BURST_RULE_ID, SIGN_IN_BURST_RULE_ID, SignInBurst, SignInBurstConfig,
 };
+pub use cadence::{
+    MACHINE_CADENCE_RULE_ID, MAX_CHAIN_ACTIONS, MachineCadence, MachineCadenceConfig,
+    REGULARITY_MIN_ACTIONS,
+};
 pub use credential::{
     CREDENTIAL_AFTER_GRANT_RULE_ID, CredentialAfterGrant, CredentialAfterGrantConfig,
+};
+pub use probe::{
+    DECOY_PATH_RULE_ID, ENDPOINT_PROBE_RULE_ID, EndpointProbe, EndpointProbeConfig,
+    MAX_DISTINCT_PATH_THRESHOLD,
 };
 pub use self_assign::{
     PRIVILEGED_SELF_ASSIGNMENT_RULE_ID, PrivilegedSelfAssignment, PrivilegedSelfAssignmentConfig,
@@ -64,6 +76,10 @@ pub struct VelocityConfig {
     pub credential_after_grant: CredentialAfterGrantConfig,
     /// The settings of [`ImpossibleSpeed`].
     pub impossible_speed: ImpossibleSpeedConfig,
+    /// The settings of [`MachineCadence`].
+    pub machine_cadence: MachineCadenceConfig,
+    /// The settings of [`EndpointProbe`].
+    pub endpoint_probe: EndpointProbeConfig,
 }
 
 /// Converts a number of seconds from a configuration to a time difference.
@@ -128,6 +144,11 @@ impl<K: Ord, V> Tracked<K, V> {
     /// Returns the state of a key, if the map has it.
     pub(crate) fn get_mut(&mut self, key: &K) -> Option<&mut V> {
         self.slots.get_mut(key).map(|slot| &mut slot.value)
+    }
+
+    /// Returns the state of each key, in key order.
+    pub(crate) fn values(&self) -> impl Iterator<Item = &V> {
+        self.slots.values().map(|slot| &slot.value)
     }
 
     /// Returns the state of a key, and records that an event at `now` used it. Makes the

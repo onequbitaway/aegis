@@ -8,6 +8,7 @@ use std::collections::BTreeSet;
 
 use aegis_app::actions::{ActionRecord, DispatchResult, SIMULATION_CONNECTOR};
 use aegis_app::report::ReplayReport;
+use aegis_contracts::Verdict;
 use aegis_contracts::action::{ActionDisposition, ActionKind, ActionStatus};
 use aegis_contracts::audit::{AuditKind, AuditLog, AuditRecord};
 use aegis_contracts::common::{EntityKind, Severity};
@@ -20,6 +21,13 @@ use aegis_testkit::fixtures::{self, expected};
 use support::Starter;
 
 const HONEYTOKEN_RULE_ID: &str = "0c9e4f7a-2b6d-4e18-a3f5-7d21c6b8e940";
+const MACHINE_CADENCE_RULE_ID: &str = "aegis.velocity.machine_cadence";
+/// Valid Accounts: the sign-in that succeeds after the sign-in burst.
+const VALID_ACCOUNT: &str = "T1078";
+/// Command and Scripting Interpreter, Cloud API: the chain at machine speed.
+const CLOUD_API: &str = "T1059.009";
+/// Unsecured Credentials: the use of the honeytoken.
+const UNSECURED_CREDENTIALS: &str = "T1552";
 
 fn is_normal(event: &Event) -> bool {
     let attack_addresses = [
@@ -63,27 +71,48 @@ async fn all_records(log: &dyn AuditLog) -> Vec<AuditRecord> {
 }
 
 #[tokio::test]
-async fn the_replay_finds_the_five_techniques_and_the_honeytoken() {
+async fn the_replay_finds_the_eight_techniques_and_the_honeytoken() {
     let starter = Starter::new();
     let (_app, report) = replay_attack(&starter).await;
 
     assert_eq!(report.events, fixtures::ATTACK_LOG_EVENTS as u64);
     assert!(report.dry_run);
     assert!(!report.model);
-    let techniques = report.techniques();
-    for technique in [
-        expected::PASSWORD_SPRAY,
-        expected::CONSENT_GRANT,
-        expected::CREDENTIAL_ADD,
-        expected::ROLE_ASSIGN,
-        expected::CLOUD_ACCOUNT,
-    ] {
-        assert!(
-            techniques.contains(technique),
-            "{technique} is not in {techniques:?}"
-        );
-    }
-    assert_eq!(report.detections.len(), 8);
+    // The five techniques of the attack steps, the valid account of the sign-in after the
+    // spray, the machine cadence of the workload identity, and the honeytoken.
+    assert_eq!(
+        report.techniques(),
+        BTreeSet::from(
+            [
+                expected::PASSWORD_SPRAY,
+                expected::CONSENT_GRANT,
+                expected::CREDENTIAL_ADD,
+                expected::ROLE_ASSIGN,
+                expected::CLOUD_ACCOUNT,
+                VALID_ACCOUNT,
+                CLOUD_API,
+                UNSECURED_CREDENTIALS,
+            ]
+            .map(str::to_owned)
+        )
+    );
+    assert_eq!(report.detections.len(), 9);
+    // The workload identity did its steps at machine speed, with a privileged change.
+    let cadence: Vec<_> = report
+        .detections
+        .iter()
+        .filter(|detection| detection.rule_id == MACHINE_CADENCE_RULE_ID)
+        .collect();
+    assert_eq!(cadence.len(), 1);
+    assert_eq!(cadence[0].verdict, Verdict::Malicious);
+    assert_eq!(cadence[0].event_ids.len(), 4);
+    assert!(
+        cadence[0]
+            .entities
+            .iter()
+            .any(|entity| entity.kind == EntityKind::ServicePrincipal
+                && entity.id == fixtures::ROGUE_PRINCIPAL_ID)
+    );
     let honeytoken: Vec<_> = report
         .detections
         .iter()
@@ -110,7 +139,7 @@ async fn the_replay_gives_one_critical_incident_with_the_attack_entities() {
     let incident = &report.incidents[0];
     assert_eq!(incident.severity, Severity::Critical);
     assert_eq!(incident.tenant.as_deref(), Some(fixtures::TENANT));
-    assert_eq!(incident.detections.len(), 8);
+    assert_eq!(incident.detections.len(), 9);
     let has = |kind: EntityKind, id: &str| {
         incident
             .entities
@@ -267,7 +296,7 @@ async fn the_audit_log_has_each_step_and_its_chain_verifies_from_the_file() {
     // One record for the start, for each detection, and for each state of the incident.
     assert_eq!(count(AuditKind::ConfigChange), 1);
     assert_eq!(records[0].kind, AuditKind::ConfigChange);
-    assert_eq!(count(AuditKind::Detection), 8);
+    assert_eq!(count(AuditKind::Detection), 9);
     assert_eq!(count(AuditKind::Incident), 7);
     // Three records for each action: the proposal, the policy decision, the execution.
     assert_eq!(count(AuditKind::ActionProposed), report.actions.len());
@@ -350,7 +379,7 @@ async fn the_normal_events_cause_nothing() {
     let full = Starter::new();
     let (_app, report) = replay_attack(&full).await;
     let normal_ids: BTreeSet<_> = normal.iter().map(|event| event.id).collect();
-    assert_eq!(report.detections.len(), 8);
+    assert_eq!(report.detections.len(), 9);
     for detection in &report.detections {
         assert!(
             detection
@@ -392,4 +421,118 @@ async fn the_report_is_json_that_decodes_to_the_same_report() {
     assert_eq!(value["events"], 648);
     assert_eq!(value["audit"]["verification"]["valid"], true);
     assert_eq!(value["incidents"][0]["severity"], "critical");
+}
+
+#[tokio::test]
+async fn a_replay_limits_the_states_of_one_incident_and_loses_no_detection() {
+    // The limit of the service on the states of one incident applies to a replay too.
+    let starter = Starter::new();
+    let config = starter.config_with(|text| {
+        text + "\n[detection.runner]\nmax_incident_updates = 2\nincident_update_window_seconds = 60\n"
+    });
+    let app = starter.build(&config, |builder| builder).await;
+
+    let report = app.replay(fixtures::artex_style_attack()).await.unwrap();
+
+    // The detections and the last state of the incident are the same as with no limit.
+    assert_eq!(report.detections.len(), 9);
+    assert_eq!(report.incidents.len(), 1);
+    let incident = &report.incidents[0];
+    assert_eq!(incident.detections.len(), 9);
+    assert_eq!(incident.severity, Severity::Critical);
+    assert_eq!(incident.status, IncidentStatus::Investigating);
+    // With no limit, the incident has seven states: 1, 2, 3, 4, 6, 8, and 9 detections.
+    // Here, two states left in the first minute, and the third left because it raised the
+    // severity to `critical`. The next three states came in the same minute, so each one
+    // replaced the state before it. The last state came in a new minute, and it replaced
+    // the state that waited.
+    let records = all_records(app.audit().as_ref()).await;
+    let states: Vec<u64> = records
+        .iter()
+        .filter(|record| record.kind == AuditKind::Incident)
+        .map(|record| record.payload["detections"].as_u64().unwrap())
+        .collect();
+    assert_eq!(states, [1, 2, 3, 9]);
+    assert_eq!(app.progress().incident_updates, 4);
+    assert_eq!(app.flood_counters().coalesced_incident_updates, 3);
+    assert!(report.audit.verification.valid);
+
+    // The default limit does not change the replay of the recorded attack log.
+    let unlimited = Starter::new();
+    let (full, _) = replay_attack(&unlimited).await;
+    assert_eq!(full.progress().incident_updates, 7);
+    assert_eq!(full.flood_counters().coalesced_incident_updates, 0);
+}
+
+#[tokio::test]
+async fn the_starter_configuration_rehearses_the_friction_playbook_as_a_dry_run() {
+    // The friction playbook runs only for the tenants that the operator names. The
+    // operator of this test permits it for the tenant of the recorded attack log.
+    let starter = Starter::new();
+    let playbook = starter
+        .path()
+        .join("playbooks/raise-friction-critical-identity-incident.yaml");
+    let text = std::fs::read_to_string(&playbook).unwrap();
+    std::fs::write(
+        &playbook,
+        support::replace_once(&text, "    - tenant.example.com", "    - tenant-contoso"),
+    )
+    .unwrap();
+    let (app, report) = replay_attack(&starter).await;
+
+    // The four playbooks of the recorded attack, and the friction playbook.
+    let playbooks: Vec<(&str, usize, usize)> = report
+        .playbook_runs
+        .iter()
+        .map(|run| (run.playbook.as_str(), run.steps.len(), run.failures()))
+        .collect();
+    assert_eq!(
+        playbooks,
+        [
+            ("block-password-spray-source", 2, 0),
+            ("contain-compromised-user", 3, 0),
+            ("raise-friction-critical-identity-incident", 2, 0),
+            ("contain-rogue-service-principal", 6, 0),
+            ("respond-to-honeytoken-trip", 5, 0),
+        ]
+    );
+    assert_eq!(report.actions.len(), 25);
+    assert_eq!(
+        by(
+            &report,
+            "playbook:raise-friction-critical-identity-incident"
+        ),
+        [
+            (
+                ActionKind::Custom("restrict_user_consent".to_owned()),
+                fixtures::TENANT.to_owned()
+            ),
+            (ActionKind::Notify, "security-operations".to_owned()),
+        ]
+    );
+    // The friction action is a dry run on the simulation connector. The outcome says that
+    // a real connector can undo the action, and the request has its revert time.
+    let friction = report
+        .actions
+        .iter()
+        .find(|action| {
+            action.request.kind == ActionKind::Custom("restrict_user_consent".to_owned())
+        })
+        .unwrap();
+    assert!(friction.request.dry_run);
+    assert_eq!(friction.request.target.kind, EntityKind::Tenant);
+    assert_eq!(
+        friction.request.parameters["revert_after_seconds"],
+        serde_json::json!(7200)
+    );
+    let DispatchResult::Disposition(ActionDisposition::Executed(outcome)) = &friction.result else {
+        panic!("expected an executed dry run, found {:?}", friction.result);
+    };
+    assert_eq!(outcome.status, ActionStatus::Simulated);
+    assert_eq!(outcome.connector, SIMULATION_CONNECTOR);
+    assert!(outcome.reversible);
+    // A dry run has nothing to revert, and nothing changed.
+    assert_eq!(app.pending_reverts().await.unwrap(), []);
+    assert!(!report.changed_the_environment());
+    assert!(report.audit.verification.valid);
 }

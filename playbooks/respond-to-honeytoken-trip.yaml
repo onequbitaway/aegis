@@ -30,12 +30,14 @@ steps:
     target:
       each_entity: ip_address
     max_targets: 5
+    revert_after: 4h
     parameters:
       direction: inbound
       duration_hours: 72
       comment: "AEGIS incident {{incident.id}}"
     reason: >-
       Incident {{incident.id}}: the address {{target.id}} touched a honeytoken. Block it.
+      AEGIS removes the block after 4 hours, unless a person confirms it.
     continue_on_error: true
 
   - id: notify-security-team
@@ -50,5 +52,6 @@ steps:
       severity: "{{incident.severity}}"
     reason: >-
       Incident {{incident.id}} ({{incident.severity}}): an identity touched a honeytoken.
-      An attacker is in the environment. Examine the identity immediately.
+      An attacker is in the environment. Examine the identity immediately. Confirm the
+      block of the source address to keep it for more than 4 hours.
     continue_on_error: true

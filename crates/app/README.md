@@ -30,6 +30,12 @@ system that the operator does not own.
 | `App::run(shutdown)`, `App::run_with(shutdown, RunOptions)` | The service. It runs until the shutdown signal. |
 | `App::replay(events)` | Examines a list of events in the process. Returns a `ReplayReport`. |
 | `App::decide_approval(id, approve, &principal, note)` | Records the decision of a person. Runs an approved action one time. |
+| `App::pending_reverts()`, `confirm_revert`, `extend_revert`, `cancel_revert` | The timed reverts: the list, and the three decisions of a person. |
+| `App::revert_action(id, &principal, reason)` | Requests the revert of one action through the dispatcher. |
+| `App::revert_scheduler()` | The scheduler of the timed reverts. `None` if the timed revert is off. |
+| `App::flood_counters()`, `App::status_sections()` | The counts of the flood protection, and the fields that the status route adds. |
+| `App::evidence()` | The evidence archive. `None` if the archive is off. |
+| `App::runs_decoy()`, `check_decoy()`, `decoy_address()` | The decoy service of the `[decoy]` section. Cargo feature `decoy`. |
 | `App::reload()`, `App::reload_by(&principal)` | Loads the rule pack, the policy, and the playbooks again. |
 | `App::wait_until(limit, condition)` | Waits for a state of the application. It uses no sleep. |
 | `App::progress()` | The counts of the bridges: events, detections, incident changes, playbook runs. |
@@ -40,6 +46,10 @@ system that the operator does not own.
 | `api::service(&app)` | Makes the `Service` of the operator API for `run_with`. Cargo feature `api`. |
 | `api::OperatorApi`, `api::BoundApi` | The operator API of one application, before and after it has a listener. |
 | `api::AppApprovals` | The approval path of the API: an `aegis_api::ApprovalActions` that calls the application. |
+| `api::AppReverts`, `api::AppStatus` | The revert path and the status source of the API. They call the application. |
+| `evidence::{EvidenceArchive, read_archive}` | The evidence archive: the writer of one application, and the reader. |
+| `sharing::{abuse_report, indicators}` | Abuse reports and indicators from the audit log and the evidence archive. They build no application and send nothing. |
+| `decoy::key_placement` | The placement of the honeytoken for one decoy key. Cargo feature `decoy`. |
 | `starter::write(dir)`, `starter::attack_events()` | The starter directory and the recorded attack log. The crate embeds them at compile time. |
 | `incidents::SharedIncidents` | The incident store for the detection engine and the agents. |
 | `actions::ActionJournal`, `actions::ActionRecord` | The single dispatcher of the process, with a journal of its requests. |
@@ -65,10 +75,11 @@ system that the operator does not own.
 | `modules(set)` | Replaces the module set of the configuration. |
 | `model(provider)` | Replaces the model of the configuration. |
 | `action_connector(connector)` | Adds an action connector. It has priority over the configured connectors. |
-| `source(connector)`, `without_configured_sources()` | Adds a source connector. Ignores the `[[sources]]` of the configuration. |
+| `source(connector)`, `without_configured_sources()` | Adds a source connector. Ignores the `[[sources]]` of the configuration, and starts no decoy. |
+| `decoy_env(function)` | The function that returns the seed and the decoy keys of the decoy service. The default reads the environment. Use it in a test. |
 | `force_dry_run()` | Makes each action a dry run, also when the configuration permits changes. |
-| `audit_file(path)` | Writes the audit log to a different file. |
-| `local_session(audit_file)` | Uses the in-process bus, the in-memory storage, and an audit file of the session. |
+| `audit_file(path)` | Writes the audit log to a different file. The application then has no revert store and no evidence archive. |
+| `local_session(audit_file)` | Uses the in-process bus, the in-memory storage, and an audit file of the session. It starts no decoy. |
 
 ## Use the crate
 
@@ -100,11 +111,14 @@ app.close().await;
 
 | Module | Component |
 | --- | --- |
-| `ingest` | One `IngestRunner` for each source. |
+| `ingest` | One `IngestRunner` for each source. The decoy service, if the configuration has the `[decoy]` section. |
 | `detection` | The bus runner of the detection engine, with the bridges. |
 | `monitor`, `hunter`, `analyst`, `responder`, `deception`, `reporter` | The agent runtime. It reads incidents and tasks from the bus. |
 | `responder` | The playbook worker, if `response.playbooks` is not `off`. |
 | `api` | The operator API. `run_with` gets its `Service` from `api::service`. |
+
+`run` also starts the revert scheduler, if the configuration has the `[response.revert]`
+table. The scheduler needs no module.
 
 - At the start, `run` writes one `config_change` audit record and gives the goal of the
   operator to the Supervisor agent.
@@ -132,6 +146,11 @@ time for the same events and the same configuration. For each event, the steps a
 The `ReplayReport` has the detections, the incidents in their last state from the store,
 each action request with its result, each playbook run, and the result of the check of the
 audit chain.
+
+A replay uses the limit of `detection.runner.max_incident_updates` on the states of one
+incident, with the times of the events. It starts no decoy and no revert scheduler. An
+action with a revert time that is not a dry run leaves a pending revert in the store, and
+the next `run` reverts it.
 
 ## The connections between the subsystems
 
@@ -327,6 +346,9 @@ type of its section. Refer to the README of that crate for the keys.
 | `[[sources]]` | A list of `aegis_ingest::SourceConfig` | No |
 | `[ingest]` | `checkpoint_dir` and `retry` (`aegis_ingest::RetryPolicy`) | No |
 | `[plugins]` | `dir` and `limits` | No |
+| `[decoy]` | `aegis_decoy::DecoyConfig` | No |
+| `[evidence]` | `enabled`, `path`, and `max_bytes` | No |
+| `[share]` | `operator_networks`, `operator_domains`, `permit_documentation_ranges`, `reporter`, and `networks` | Only for the sharing functions |
 | `[api]` | `aegis_api::ApiConfig` | Only with the module `api` |
 
 A section name that is not in this table is an error. Each section rejects a key that it
@@ -349,10 +371,57 @@ the process. The command-line program uses the directory of the configuration fi
 | `routes` | Empty | A list of `aegis_respond::Route`: the connector for an action type. |
 | `environment` | Not set | A table that the policy reads as `input.environment`. |
 | `execution_timeout_seconds` | `120` | The maximum time for one connector call. |
+| `revert` | Not set | The timed revert: `enabled`, `store`, `retry_base_seconds`, `retry_max_seconds`, and `approval_poll_seconds`. |
 
 A connector that comes first has priority for an action type with no route. The order is:
 the connectors of `AppBuilder::action_connector`, `graph`, `webhook`, the action plugins,
 the honeytoken connector, and the simulation connector.
+
+The simulation connector takes the built-in action types and the two friction actions of
+`aegis-respond` as dry runs. Its outcome has `reversible: true` for an action type that
+has an inverse, so a playbook with a revert time can run as a rehearsal.
+
+### The timed revert
+
+With the table `[response.revert]`, the dispatcher keeps each pending revert in the file
+`store`, and `run` starts the `RevertScheduler` of `aegis-respond`.
+
+- With no table, the dispatcher has no revert store. A request with a revert time that is
+  not a dry run then is an `Error::Config`, and the connector gets no call.
+- One process uses one store file. An application with `audit_file` or `local_session`
+  has no revert store.
+- A store file that is not valid stops the build with `Error::Integrity`.
+- `confirm_revert`, `extend_revert`, `cancel_revert`, and `revert_action` need the
+  permission `approve_actions`. Each revert goes through the dispatcher: the policy, the
+  approval queue, and the audit log.
+
+### The decoy service
+
+With the `[decoy]` section and the module `ingest`, `run` starts one `DecoyService` of
+`aegis-decoy` and one ingestion runner for its events.
+
+- Each decoy key of `decoy.model_api.keys` is a honeytoken in the registry of the
+  application, with the `id` of the key. The registry does not get the key.
+- The seed and each decoy key come from environment variables. A variable that is not set
+  stops `run` with an `Error::Config` that names the section and the variable.
+- `decoy.bind` on the address of `api.bind` is an `Error::Config`. `decoy.id` must not be
+  the name of a source.
+- The decoy stops with the service. Its runner publishes the events that remain.
+- `replay` and a local session start no decoy.
+
+### The evidence archive and the sharing functions
+
+With the `[evidence]` section, the bridge writes each new detection to the archive file,
+with the events that caused it. The incident store writes each state of an incident.
+
+- The archive keeps `max_bytes` at most, in the file and in one older file.
+- A write that fails does not stop a detection. `status_sections` has the counts.
+- The indicators for a rule pack never name an address of `operator_networks` or a
+  loopback address.
+- `sharing::abuse_report` and `sharing::indicators` read the archive and the audit log of
+  the configuration. They take `Settings`, and they build no application. They refuse to
+  run with no `operator_networks` in the `[share]` section, and with an audit chain that
+  does not verify.
 
 ### `[agents]`
 
@@ -433,12 +502,13 @@ file.
 | `plugins` | The `[plugins]` section (`aegis-plugin`). |
 | `otlp` | The OpenTelemetry trace exporter of `aegis-core`. |
 | `api` | The `[api]` section and the module `api` of this crate (`aegis-api`). |
+| `decoy` | The `[decoy]` section and the decoy service (`aegis-decoy`). |
 | `grpc` | The gRPC services of the operator API. It includes `api`. It is not a default feature. |
 | `docker-tests` | The tests that need Docker. |
 
-`postgres`, `plugins`, `otlp`, and `api` are default features. With
+`postgres`, `plugins`, `otlp`, `api`, and `decoy` are default features. With
 `--no-default-features`, the crate builds a light process for monitoring, with no HTTP
-server. A section or a module that needs a feature that the build does not have is an
+server and no decoy. A section or a module that needs a feature that the build does not have is an
 `Error::Config`.
 
 ## Test the crate
@@ -492,6 +562,15 @@ starts with `aegis-test-app-`. The test removes the containers.
   record.
 - The operator API needs the agent runtime. A process with no agent module cannot have
   the module `api`.
+- The revert store and the evidence archive are files. They have no PostgreSQL form. Run
+  one service for one revert store file.
+- The action journal has no record of a revert request. The audit log has each revert.
+- The evidence archive holds only the events that caused a detection, and 256 events for
+  one detection at most. The bridge finds these events in its memory of the 1024 newest
+  events. An event that is older is not in the archive.
+- One process runs one decoy. With the in-process bus, the last contacts before a
+  shutdown are not examined.
+- The sharing functions read a file audit log of 1 GiB at most.
 - The operator API has the playbook set of the time when `api::OperatorApi::new` ran. After
   `App::reload`, the API lists and runs the old set until the process starts again. The
   command-line program does not call `reload`.

@@ -39,7 +39,10 @@ fn program(directory: &Path, arguments: &[&str]) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_aegis"));
     for (name, _) in std::env::vars_os() {
         let name_text = name.to_string_lossy().to_uppercase();
-        if name_text.starts_with("AEGIS__") || name_text == API_TOKEN_VARIABLE {
+        if name_text.starts_with("AEGIS__")
+            || name_text == API_TOKEN_VARIABLE
+            || DECOY_VARIABLES.contains(&name_text.as_str())
+        {
             command.env_remove(name);
         }
     }
@@ -52,6 +55,10 @@ fn program(directory: &Path, arguments: &[&str]) -> Command {
 
 /// The variable that the `[api]` example of the starter configuration names.
 const API_TOKEN_VARIABLE: &str = "AEGIS_TOKEN_ALICE";
+
+/// The variables that the `[decoy]` example of the starter configuration names: the seed
+/// and the decoy key.
+const DECOY_VARIABLES: [&str; 2] = ["AEGIS_DECOY_SEED", "AEGIS_DECOY_MODEL_KEY"];
 
 fn stdout(output: &Output) -> String {
     String::from_utf8(output.stdout.clone()).unwrap()
@@ -110,7 +117,12 @@ fn demo_prints_the_incident_the_actions_and_a_valid_chain() {
         "{report}"
     );
     // The detections with their ATT&CK identifiers.
-    assert!(report.contains("\nDetections (8)\n"), "{report}");
+    assert!(report.contains("\nDetections (9)\n"), "{report}");
+    let detections: Vec<&str> = report
+        .lines()
+        .filter(|line| line.contains("  malicious  "))
+        .collect();
+    assert_eq!(detections.len(), 9);
     for technique in [
         fixtures::expected::PASSWORD_SPRAY,
         fixtures::expected::CONSENT_GRANT,
@@ -118,12 +130,21 @@ fn demo_prints_the_incident_the_actions_and_a_valid_chain() {
         fixtures::expected::ROLE_ASSIGN,
         fixtures::expected::CLOUD_ACCOUNT,
     ] {
-        let lines: Vec<&str> = report
-            .lines()
-            .filter(|line| line.contains("  malicious  ") && line.contains(technique))
+        let lines: Vec<&str> = detections
+            .iter()
+            .copied()
+            .filter(|line| line.contains(technique))
             .collect();
         assert!(!lines.is_empty(), "{technique} is not in a detection line");
     }
+    // The chain of the workload identity at machine speed is one detection.
+    let cadence: Vec<&str> = detections
+        .iter()
+        .copied()
+        .filter(|line| line.ends_with("[aegis.velocity.machine_cadence]"))
+        .collect();
+    assert_eq!(cadence.len(), 1);
+    assert!(cadence[0].contains("T1059.009"), "{}", cadence[0]);
     assert!(report.contains("Honeytoken used"), "{report}");
     // The incident.
     assert!(report.contains("\nIncidents (1)\n"), "{report}");
@@ -133,6 +154,10 @@ fn demo_prints_the_incident_the_actions_and_a_valid_chain() {
         .unwrap();
     assert!(incident.contains("critical"), "{incident}");
     assert!(incident.contains("investigating"), "{incident}");
+    assert!(
+        incident.ends_with("Multi-stage attack: 8 ATT&CK techniques in 9 detections"),
+        "{incident}"
+    );
     let entities = report
         .lines()
         .find(|line| line.trim_start().starts_with("Entities:"))
@@ -189,7 +214,7 @@ fn demo_prints_the_incident_the_actions_and_a_valid_chain() {
         .unwrap()
         .parse()
         .unwrap();
-    assert!(records > 100, "{records}");
+    assert_eq!(records, 156);
     assert!(audit.contains("\n  Chain: valid\n"), "{audit}");
     let file = target.join("data/audit.jsonl");
     assert_eq!(
@@ -344,7 +369,7 @@ fn monitor_prints_each_detection_and_incident_and_takes_no_action() {
         .lines()
         .filter(|line| line.starts_with("DETECTION  "))
         .collect();
-    assert_eq!(detections.len(), 8);
+    assert_eq!(detections.len(), 9);
     assert!(
         detections[0].contains("T1110.003")
             && detections[0].contains("Sign-in burst from one address"),
@@ -352,9 +377,15 @@ fn monitor_prints_each_detection_and_incident_and_takes_no_action() {
         detections[0]
     );
     assert!(
-        detections[7].contains("T1552") && detections[7].contains("Honeytoken used"),
+        detections[7].contains("T1059.009")
+            && detections[7].contains("Chain of sensitive actions at machine speed"),
         "{}",
         detections[7]
+    );
+    assert!(
+        detections[8].contains("T1552") && detections[8].contains("Honeytoken used"),
+        "{}",
+        detections[8]
     );
     let incidents: Vec<&str> = report
         .lines()
@@ -364,7 +395,7 @@ fn monitor_prints_each_detection_and_incident_and_takes_no_action() {
     assert!(incidents[6].contains("critical"), "{}", incidents[6]);
     assert!(
         report.ends_with(
-            "\nMonitoring session complete: 648 events, 8 detections, 7 incident states. \
+            "\nMonitoring session complete: 648 events, 9 detections, 7 incident states. \
              Actions taken: 0.\n"
         ),
         "{report}"
@@ -386,16 +417,16 @@ fn monitor_prints_each_detection_and_incident_and_takes_no_action() {
         .lines()
         .map(|line| serde_json::from_str(line).unwrap())
         .collect();
-    assert_eq!(lines.len(), 16);
+    assert_eq!(lines.len(), 17);
     let kinds: Vec<&str> = lines
         .iter()
         .map(|line| line["type"].as_str().unwrap())
         .collect();
-    assert_eq!(kinds.iter().filter(|kind| **kind == "detection").count(), 8);
+    assert_eq!(kinds.iter().filter(|kind| **kind == "detection").count(), 9);
     assert_eq!(kinds.iter().filter(|kind| **kind == "incident").count(), 7);
-    assert_eq!(kinds[15], "summary");
-    assert_eq!(lines[15]["actions"], 0);
-    assert_eq!(lines[15]["events"], 648);
+    assert_eq!(kinds[16], "summary");
+    assert_eq!(lines[16]["actions"], 0);
+    assert_eq!(lines[16]["events"], 648);
 }
 
 #[test]
@@ -417,7 +448,7 @@ fn monitor_with_a_configuration_does_not_write_the_audit_log_of_that_configurati
             .lines()
             .filter(|line| line.starts_with("DETECTION  "))
             .count(),
-        8
+        9
     );
     assert!(!starter.join("data/audit.jsonl").exists());
 }
@@ -445,7 +476,7 @@ fn replay_gives_json_that_parses_and_an_audit_log_that_verifies() {
     assert_eq!(report["events"], 648);
     assert_eq!(report["dry_run"], true);
     assert_eq!(report["model"], false);
-    assert_eq!(report["detections"].as_array().unwrap().len(), 8);
+    assert_eq!(report["detections"].as_array().unwrap().len(), 9);
     let incidents = report["incidents"].as_array().unwrap();
     assert_eq!(incidents.len(), 1);
     assert_eq!(incidents[0]["severity"], "critical");
@@ -1158,6 +1189,108 @@ fn run_serves_the_operator_api_until_a_stop_signal() {
     );
     assert_eq!(status, 401);
 
+    // The commands for timed reverts call the operator API of this running service. The
+    // token comes from an environment variable.
+    let url = format!("http://{address}");
+    let reverts = |arguments: &[&str], token: Option<&str>| {
+        let mut command = program(directory.path(), arguments);
+        command
+            .env_remove("AEGIS_API_TOKEN")
+            .env_remove("AEGIS_API_URL");
+        if let Some(token) = token {
+            command.env("AEGIS_API_TOKEN", token);
+        }
+        command.output().unwrap()
+    };
+    let list = reverts(&["reverts", "list", "--url", &url], Some(token));
+    assert_success(&list);
+    assert_eq!(
+        stdout(&list),
+        format!(
+            "Timed reverts (0) of the service at {url}\n  No action waits for a timed revert.\n"
+        )
+    );
+    let list = reverts(
+        &["reverts", "list", "--url", &url, "--format", "json"],
+        Some(token),
+    );
+    assert_success(&list);
+    assert_eq!(
+        serde_json::from_str::<Value>(&stdout(&list)).unwrap(),
+        serde_json::json!({ "enabled": true, "items": [], "total": 0 })
+    );
+    // The address can come from the environment, and the token variable has a name.
+    let mut from_environment = program(
+        directory.path(),
+        &["reverts", "list", "--token-env", "AEGIS_TEST_OTHER_TOKEN"],
+    );
+    from_environment
+        .env("AEGIS_API_URL", &url)
+        .env("AEGIS_TEST_OTHER_TOKEN", token);
+    let list = from_environment.output().unwrap();
+    assert_success(&list);
+    assert!(
+        stdout(&list).starts_with("Timed reverts (0)"),
+        "{}",
+        stdout(&list)
+    );
+
+    // The service refuses a token that it does not know. The error does not show the token.
+    let wrong = "not-the-token-0123456789abcdef012345";
+    let refused = reverts(&["reverts", "list", "--url", &url], Some(wrong));
+    assert_failure(&refused);
+    assert!(
+        stderr(&refused)
+            .contains("the operator API answered GET /reverts with the status 401 (unauthorized)"),
+        "{}",
+        stderr(&refused)
+    );
+    assert!(!stderr(&refused).contains(wrong));
+    // No token variable: the command sends no request.
+    let no_token = reverts(&["reverts", "list", "--url", &url], None);
+    assert_failure(&no_token);
+    assert!(
+        stderr(&no_token).contains("the environment variable AEGIS_API_TOKEN is not set"),
+        "{}",
+        stderr(&no_token)
+    );
+    // An action that has no pending revert, and an identifier that is not valid.
+    let unknown = "0190d5b0-7c3a-7e5b-9f6e-3d2c1b0a9f8e";
+    for arguments in [
+        vec!["reverts", "confirm", unknown, "--url", &url],
+        vec!["reverts", "extend", unknown, "--by", "2h", "--url", &url],
+        vec!["reverts", "cancel", unknown, "--url", &url],
+    ] {
+        let output = reverts(&arguments, Some(token));
+        assert_failure(&output);
+        assert!(
+            stderr(&output).contains("with the status 404 (not_found)"),
+            "{arguments:?}: {}",
+            stderr(&output)
+        );
+    }
+    let bad = reverts(
+        &["reverts", "confirm", "the-last-one", "--url", &url],
+        Some(token),
+    );
+    assert_failure(&bad);
+    assert!(
+        stderr(&bad).contains("the action identifier is not a valid UUID"),
+        "{}",
+        stderr(&bad)
+    );
+    // The token never goes over the network with no encryption.
+    let remote = reverts(
+        &["reverts", "list", "--url", "http://192.0.2.10:8080"],
+        Some(token),
+    );
+    assert_failure(&remote);
+    assert!(
+        stderr(&remote).contains("uses http for a host that is not a loopback address"),
+        "{}",
+        stderr(&remote)
+    );
+
     // SIGTERM stops the server and the application. The exit status is 0.
     assert!(signal("-TERM"));
     let (done, exited) = mpsc::channel();
@@ -1197,4 +1330,551 @@ fn run_serves_the_operator_api_until_a_stop_signal() {
         ],
     );
     assert_success(&verify);
+}
+
+/// The `[share]` section of the tests. The recorded attack log uses the documentation
+/// ranges, so the tests permit them. The office network is the network of the operator.
+const SHARE_SECTION: &str = "\n[share]\noperator_networks = [\"198.51.100.0/24\"]\n\
+                             permit_documentation_ranges = true\n";
+
+/// The incident of the recorded attack log. Its identifier comes from its events.
+const ATTACK_INCIDENT: &str = "508657f7-d921-8cb3-add4-c2bd62528abd";
+
+/// Runs the demonstration in a new directory and returns its configuration file.
+fn demo_directory() -> (TempDir, PathBuf) {
+    let directory = tempfile::tempdir().unwrap();
+    let target = directory.path().join("demo");
+    let output = aegis(directory.path(), &["demo", "--dir", text(&target)]);
+    assert_success(&output);
+    assert!(
+        stdout(&output).contains(&format!("\n  {ATTACK_INCIDENT}  critical")),
+        "{}",
+        stdout(&output)
+    );
+    let config = target.join("aegis.toml");
+    (directory, config)
+}
+
+fn add_share_section(config: &Path) {
+    let mut text = std::fs::read_to_string(config).unwrap();
+    text.push_str(SHARE_SECTION);
+    std::fs::write(config, text).unwrap();
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::Digest as _;
+    hex::encode(sha2::Sha256::digest(bytes))
+}
+
+#[test]
+fn report_abuse_writes_reports_whose_manifest_verifies_and_that_name_no_operator_data() {
+    let (directory, config) = demo_directory();
+    let out = directory.path().join("reports");
+    let arguments = [
+        "report",
+        "abuse",
+        "--config",
+        text(&config),
+        "--incident",
+        ATTACK_INCIDENT,
+        "--out",
+        text(&out),
+    ];
+
+    // With no network of the operator, the command refuses and writes nothing.
+    let refused = aegis(directory.path(), &arguments);
+    assert_failure(&refused);
+    assert!(
+        stderr(&refused).contains("the section `share` has no `operator_networks`")
+            && stderr(&refused).contains("AEGIS wrote no document"),
+        "{}",
+        stderr(&refused)
+    );
+    assert!(!out.exists());
+
+    add_share_section(&config);
+    let output = aegis(directory.path(), &arguments);
+    assert_success(&output);
+    let report = stdout(&output);
+    assert!(
+        report.starts_with(&format!(
+            "Wrote 3 reports for the incident {ATTACK_INCIDENT} to {}:\n",
+            out.display()
+        )),
+        "{report}"
+    );
+    // The command says which evidence it had, and that it sent nothing.
+    for sentence in [
+        "The incident comes from the evidence archive: the incident store of this \
+         configuration is in the memory of the service.",
+        "The evidence archive gave 9 detections and 18 log records. The archive holds only \
+         the events that caused a detection, not all events of an address.",
+        "The audit log has 156 records, and its hash chain verifies. 9 of them seal a \
+         detection of this document.",
+    ] {
+        assert!(report.contains(sentence), "{sentence}\n{report}");
+    }
+    assert!(
+        report.ends_with("\nAEGIS sent nothing. Read each document before you send it.\n"),
+        "{report}"
+    );
+
+    // One directory for each attacker address, with the four files.
+    let mut directories: Vec<String> = std::fs::read_dir(&out)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect();
+    directories.sort();
+    assert_eq!(
+        directories,
+        [
+            "address-192.0.2.77",
+            "address-203.0.113.50",
+            "address-203.0.113.51"
+        ]
+    );
+    // The names of the operator that a report must not hold: the accounts, the
+    // application, the tenant, and an address of the office network.
+    let operator_names = [
+        fixtures::VICTIM_USER_ID,
+        fixtures::ROGUE_PRINCIPAL_ID,
+        fixtures::ROGUE_APP_ID,
+        fixtures::TENANT,
+        "198.51.100.",
+    ];
+    // The evidence items of each report: the log records of the address that the archive
+    // holds, and one audit record for each detection that names the address.
+    let expected_items = [1 + 2, 13 + 4, 4 + 5];
+    for (name, expected) in directories.iter().zip(expected_items) {
+        let report_directory = out.join(name);
+        let mut files: Vec<String> = std::fs::read_dir(&report_directory)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        files.sort();
+        assert_eq!(
+            files,
+            [
+                "evidence.jsonl",
+                "manifest.json",
+                "report.json",
+                "report.md"
+            ],
+            "{name}"
+        );
+
+        // The manifest verifies: the hash of the file, and the hash of each line.
+        let evidence = std::fs::read(report_directory.join("evidence.jsonl")).unwrap();
+        let manifest: Value =
+            serde_json::from_slice(&std::fs::read(report_directory.join("manifest.json")).unwrap())
+                .unwrap();
+        assert_eq!(manifest["algorithm"], "sha256", "{name}");
+        assert_eq!(manifest["file_name"], "evidence.jsonl", "{name}");
+        assert_eq!(manifest["file_bytes"], evidence.len(), "{name}");
+        assert_eq!(manifest["file_sha256"], sha256_hex(&evidence), "{name}");
+        let items = manifest["items"].as_array().unwrap();
+        let lines: Vec<&[u8]> = evidence
+            .split(|byte| *byte == b'\n')
+            .filter(|line| !line.is_empty())
+            .collect();
+        assert_eq!(lines.len(), expected, "{name}");
+        assert_eq!(items.len(), lines.len(), "{name}");
+        for (item, line) in items.iter().zip(&lines) {
+            assert_eq!(item["sha256"], sha256_hex(line), "{name}: {item}");
+        }
+
+        for file in &files {
+            let content = std::fs::read_to_string(report_directory.join(file)).unwrap();
+            for operator_name in operator_names {
+                assert!(
+                    !content.contains(operator_name),
+                    "{name}/{file} holds {operator_name}"
+                );
+            }
+        }
+        let address = name.strip_prefix("address-").unwrap();
+        let markdown = std::fs::read_to_string(report_directory.join("report.md")).unwrap();
+        assert!(
+            markdown.starts_with(&format!("# Abuse report: activity from {address}\n")),
+            "{markdown}"
+        );
+        assert!(
+            markdown.contains("It does not identify a person or a group."),
+            "{name}"
+        );
+    }
+
+    // The command replaces no file.
+    let before = std::fs::read(out.join("address-203.0.113.50/report.md")).unwrap();
+    let again = aegis(directory.path(), &arguments);
+    assert_failure(&again);
+    assert!(
+        stderr(&again).contains("exists already, and AEGIS does not replace a file"),
+        "{}",
+        stderr(&again)
+    );
+    assert_eq!(
+        std::fs::read(out.join("address-203.0.113.50/report.md")).unwrap(),
+        before
+    );
+
+    // An incident that the archive does not have, and an identifier that is not valid.
+    let unknown = aegis(
+        directory.path(),
+        &[
+            "report",
+            "abuse",
+            "--config",
+            text(&config),
+            "--incident",
+            "0190d5b0-7c3a-7e5b-9f6e-3d2c1b0a9f8e",
+            "--out",
+            text(&directory.path().join("other")),
+        ],
+    );
+    assert_failure(&unknown);
+    assert!(
+        stderr(&unknown).contains(
+            "the incident 0190d5b0-7c3a-7e5b-9f6e-3d2c1b0a9f8e was not found. The incident \
+             store of this configuration is in the memory of the service"
+        ),
+        "{}",
+        stderr(&unknown)
+    );
+    assert!(!directory.path().join("other").exists());
+}
+
+#[test]
+fn indicators_export_writes_valid_stix_and_csv_and_needs_a_tlp_level() {
+    let (directory, config) = demo_directory();
+    let stix_file = directory.path().join("indicators.json");
+    let export = |format: &str, tlp: Option<&str>, out: &Path| {
+        let mut arguments = vec![
+            "indicators",
+            "export",
+            "--config",
+            text(&config),
+            "--format",
+            format,
+            "--out",
+            text(out),
+        ];
+        if let Some(tlp) = tlp {
+            arguments.extend(["--tlp", tlp]);
+        }
+        aegis(directory.path(), &arguments)
+    };
+
+    // With no network of the operator, the command refuses.
+    let refused = export("stix", Some("amber"), &stix_file);
+    assert_failure(&refused);
+    assert!(
+        stderr(&refused).contains("the section `share` has no `operator_networks`"),
+        "{}",
+        stderr(&refused)
+    );
+    assert!(!stix_file.exists());
+    add_share_section(&config);
+
+    // The level has no default.
+    let no_level = export("stix", None, &stix_file);
+    assert_failure(&no_level);
+    assert!(
+        stderr(&no_level).contains("select the TLP level of the document with --tlp"),
+        "{}",
+        stderr(&no_level)
+    );
+    assert!(!stix_file.exists());
+
+    let output = export("stix", Some("amber"), &stix_file);
+    assert_success(&output);
+    assert!(
+        stdout(&output).starts_with(&format!(
+            "Wrote 4 indicators to {} (format stix, TLP:AMBER).\n",
+            stix_file.display()
+        )),
+        "{}",
+        stdout(&output)
+    );
+    assert!(
+        stdout(&output).ends_with("\nAEGIS sent nothing. Read each document before you send it.\n")
+    );
+
+    // The file is one STIX 2.1 bundle: the TLP marking, and one indicator for each value.
+    let bundle: Value = serde_json::from_slice(&std::fs::read(&stix_file).unwrap()).unwrap();
+    assert_eq!(bundle["type"], "bundle");
+    let bundle_id = bundle["id"].as_str().unwrap();
+    assert!(is_stix_id(bundle_id, "bundle"), "{bundle_id}");
+    let objects = bundle["objects"].as_array().unwrap();
+    assert_eq!(objects.len(), 5);
+    let amber = "marking-definition--f88d31f6-486f-44da-b317-01333bde0b82";
+    assert_eq!(objects[0]["type"], "marking-definition");
+    assert_eq!(objects[0]["id"], amber);
+    assert_eq!(
+        objects[0]["definition"],
+        serde_json::json!({ "tlp": "amber" })
+    );
+    let mut patterns = Vec::new();
+    for object in &objects[1..] {
+        assert_eq!(object["type"], "indicator", "{object}");
+        assert_eq!(object["spec_version"], "2.1", "{object}");
+        assert!(
+            is_stix_id(object["id"].as_str().unwrap(), "indicator"),
+            "{object}"
+        );
+        assert_eq!(object["pattern_type"], "stix", "{object}");
+        assert_eq!(
+            object["object_marking_refs"],
+            serde_json::json!([amber]),
+            "{object}"
+        );
+        assert_eq!(
+            object["indicator_types"],
+            serde_json::json!(["malicious-activity"]),
+            "{object}"
+        );
+        for time in ["created", "modified", "valid_from", "valid_until"] {
+            let value = object[time].as_str().unwrap();
+            assert!(value.ends_with('Z') && value.len() == 24, "{time}: {value}");
+        }
+        patterns.push(object["pattern"].as_str().unwrap().to_owned());
+    }
+    assert_eq!(
+        patterns,
+        [
+            "[ipv4-addr:value = '192.0.2.77']",
+            "[ipv4-addr:value = '203.0.113.50']",
+            "[ipv4-addr:value = '203.0.113.51']",
+            "[network-traffic:extensions.'http-request-ext'.request_header.'User-Agent' = \
+             'python-httpx/0.27.0']",
+        ]
+    );
+    // No object names an account, the tenant, or an address of the operator.
+    let stix_text = std::fs::read_to_string(&stix_file).unwrap();
+    for operator_name in [
+        fixtures::VICTIM_USER_ID,
+        fixtures::ROGUE_PRINCIPAL_ID,
+        fixtures::TENANT,
+        "198.51.100.",
+    ] {
+        assert!(!stix_text.contains(operator_name), "{operator_name}");
+    }
+    // The command replaces no file.
+    let again = export("stix", Some("red"), &stix_file);
+    assert_failure(&again);
+    assert_eq!(std::fs::read_to_string(&stix_file).unwrap(), stix_text);
+
+    // CSV: the header, and one row for each indicator with the level.
+    let csv_file = directory.path().join("indicators.csv");
+    assert_success(&export("csv", Some("green"), &csv_file));
+    let csv = std::fs::read_to_string(&csv_file).unwrap();
+    let rows: Vec<&str> = csv.split("\r\n").filter(|row| !row.is_empty()).collect();
+    assert_eq!(rows.len(), 5, "{csv}");
+    assert_eq!(
+        rows[0],
+        "type,value,basis,first_seen,last_seen,events,detections,techniques,tlp"
+    );
+    assert!(
+        rows[2].starts_with("ipv4,203.0.113.50,malicious_activity,"),
+        "{}",
+        rows[2]
+    );
+    for row in &rows[1..] {
+        assert!(row.ends_with(",TLP:GREEN"), "{row}");
+    }
+
+    // The recorded attack log has no decoy, so the format for a rule pack has no
+    // indicator, and the command writes no file.
+    let pack_file = directory.path().join("decoy.yml");
+    let pack = export("pack", None, &pack_file);
+    assert_failure(&pack);
+    assert!(
+        stderr(&pack).contains("The format pack uses only the detections of decoys"),
+        "{}",
+        stderr(&pack)
+    );
+    assert!(!pack_file.exists());
+
+    // The document formats are not report formats of the other commands.
+    let wrong = export("text", Some("amber"), &directory.path().join("x"));
+    assert_failure(&wrong);
+    assert!(
+        stderr(&wrong).contains("--format stix, --format csv, or --format pack"),
+        "{}",
+        stderr(&wrong)
+    );
+    let demo = aegis(directory.path(), &["demo", "--format", "stix"]);
+    assert_failure(&demo);
+    assert!(
+        stderr(&demo).contains("Use --format text or --format json with this command"),
+        "{}",
+        stderr(&demo)
+    );
+}
+
+/// Returns `true` if `id` is a STIX identifier of the type `kind`: the type, two hyphens,
+/// and a UUID.
+fn is_stix_id(id: &str, kind: &str) -> bool {
+    let Some(uuid) = id.strip_prefix(&format!("{kind}--")) else {
+        return false;
+    };
+    let groups: Vec<&str> = uuid.split('-').collect();
+    groups.iter().map(|group| group.len()).collect::<Vec<_>>() == [8, 4, 4, 4, 12]
+        && uuid
+            .chars()
+            .all(|character| character == '-' || character.is_ascii_hexdigit())
+}
+
+/// Removes the comment mark from the `[decoy]` example of the starter configuration.
+fn with_decoy_example(text: &str) -> String {
+    let (before, rest) = text.split_once("# [decoy]\n").unwrap();
+    let mut example = String::from("[decoy]\n");
+    let mut after = String::new();
+    let mut in_example = true;
+    for line in rest.lines() {
+        if in_example {
+            match line.strip_prefix("# ").or_else(|| line.strip_prefix('#')) {
+                Some(line) => {
+                    example.push_str(line);
+                    example.push('\n');
+                    continue;
+                }
+                // The first line that is not a comment ends the example.
+                None => in_example = false,
+            }
+        }
+        after.push_str(line);
+        after.push('\n');
+    }
+    format!("{before}{example}{after}")
+}
+
+#[cfg(feature = "decoy")]
+#[test]
+fn config_check_validates_the_decoy_example_of_the_starter_configuration() {
+    let (directory, starter) = init();
+    let config = starter.join("aegis.toml");
+    let good = std::fs::read_to_string(&config).unwrap();
+    // The starter configuration has the example as a comment, so it starts no decoy.
+    assert_eq!(good.matches("\n# [decoy]\n").count(), 1);
+    let check = |contents: &str, variables: &[(&str, &str)]| {
+        std::fs::write(&config, contents).unwrap();
+        let mut command = program(
+            directory.path(),
+            &["config", "check", "--config", text(&config)],
+        );
+        command.envs(variables.iter().copied());
+        command.output().unwrap()
+    };
+    let off = check(&good, &[]);
+    assert_success(&off);
+    assert!(
+        stdout(&off).contains("\n  decoy: off\n"),
+        "{}",
+        stdout(&off)
+    );
+
+    // The example is a valid section. Its secrets come from the environment.
+    let example = with_decoy_example(&good);
+    assert!(example.contains("\n[decoy]\nid = \"decoy-lab\"\nbind = \"127.0.0.1:8081\"\n"));
+    assert!(example.contains("\n[[decoy.model_api.keys]]\nid = \"ht-decoy-model-key\"\n"));
+    let seed = "example-seed-0123456789abcdef0123456789";
+    let key = "decoy-key-EXAMPLE-0123456789abcdefABCDEF";
+    let valid = check(
+        &example,
+        &[("AEGIS_DECOY_SEED", seed), ("AEGIS_DECOY_MODEL_KEY", key)],
+    );
+    assert_success(&valid);
+    assert!(
+        stdout(&valid).contains("\n  decoy: 127.0.0.1:8081\n"),
+        "{}",
+        stdout(&valid)
+    );
+    // The check opened no listener: the address is free.
+    drop(std::net::TcpListener::bind("127.0.0.1:8081"));
+
+    // With no seed, the check names the variable. With a short seed, it does not show it.
+    let no_seed = check(&example, &[("AEGIS_DECOY_MODEL_KEY", key)]);
+    assert_failure(&no_seed);
+    assert!(
+        stdout(&no_seed).contains(
+            "\n  1. configuration error: the section `decoy` is not valid: decoy decoy-lab: the \
+             environment variable AEGIS_DECOY_SEED is not set\n"
+        ),
+        "{}",
+        stdout(&no_seed)
+    );
+    let short = check(
+        &example,
+        &[
+            ("AEGIS_DECOY_SEED", "short-seed"),
+            ("AEGIS_DECOY_MODEL_KEY", key),
+        ],
+    );
+    assert_failure(&short);
+    assert!(
+        stdout(&short).contains("the section `decoy` is not valid: decoy decoy-lab: the seed in"),
+        "{}",
+        stdout(&short)
+    );
+    assert!(!stdout(&short).contains("short-seed") && !stderr(&short).contains("short-seed"));
+
+    // A value that is not valid, and a decoy on the address of the operator API.
+    let bad = check(
+        &example.replace(
+            "personas = [\"tarpit\", \"maze\", \"model_api\"]",
+            "personas = []",
+        ),
+        &[("AEGIS_DECOY_SEED", seed), ("AEGIS_DECOY_MODEL_KEY", key)],
+    );
+    assert_failure(&bad);
+    assert!(
+        stdout(&bad).contains("configuration error: the section `decoy` is not valid:"),
+        "{}",
+        stdout(&bad)
+    );
+    #[cfg(feature = "api")]
+    {
+        let clash = with_api_example(&example)
+            .replace("bind = \"127.0.0.1:8081\"", "bind = \"127.0.0.1:8080\"");
+        let output = check(
+            &clash,
+            &[
+                ("AEGIS_DECOY_SEED", seed),
+                ("AEGIS_DECOY_MODEL_KEY", key),
+                (API_TOKEN_VARIABLE, "a-token-of-the-test-0123456789abcdef"),
+            ],
+        );
+        assert_failure(&output);
+        assert!(
+            stdout(&output).contains(
+                "the section `decoy` is not valid: bind is 127.0.0.1:8080, which is the address \
+                 of the operator API (api.bind = 127.0.0.1:8080)"
+            ),
+            "{}",
+            stdout(&output)
+        );
+    }
+}
+
+#[cfg(not(feature = "decoy"))]
+#[test]
+fn a_build_without_the_decoy_feature_refuses_the_section() {
+    let (directory, starter) = init();
+    let config = starter.join("aegis.toml");
+    let good = std::fs::read_to_string(&config).unwrap();
+    std::fs::write(&config, with_decoy_example(&good)).unwrap();
+    let check = aegis(
+        directory.path(),
+        &["config", "check", "--config", text(&config)],
+    );
+    assert_failure(&check);
+    assert!(
+        stdout(&check).contains(
+            "\n  1. configuration error: the section `decoy` is not valid: the section needs the \
+             Cargo feature `decoy`, and this build does not have it"
+        ),
+        "{}",
+        stdout(&check)
+    );
 }

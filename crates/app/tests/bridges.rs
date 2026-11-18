@@ -62,15 +62,15 @@ async fn an_incident_that_an_agent_moved_past_open_keeps_its_state_and_gets_new_
     assert!(agent_entries.len() >= 4, "{agent_entries:?}");
     assert_eq!(tracked_actions(&incident).len(), 1);
 
-    // The later events add seven detections. Each state of the engine is `open`.
+    // The later events add eight detections. Each state of the engine is `open`.
     let second = app.replay(events_after_the_spray()).await.unwrap();
 
-    assert_eq!(second.detections.len(), 7);
+    assert_eq!(second.detections.len(), 8);
     assert_eq!(second.incidents.len(), 1);
     let later = &second.incidents[0];
     assert_eq!(later.id, incident.id);
     assert_eq!(later.status, IncidentStatus::Investigating);
-    assert_eq!(later.detections.len(), 8);
+    assert_eq!(later.detections.len(), 9);
     assert_eq!(later.severity, Severity::Critical);
     // The work of the agents on the first state is in the last state.
     for entry in &agent_entries {
@@ -95,8 +95,8 @@ async fn an_incident_that_an_agent_moved_past_open_keeps_its_state_and_gets_new_
             (3, IncidentStatus::Investigating),
             (4, IncidentStatus::Investigating),
             (6, IncidentStatus::Investigating),
-            (7, IncidentStatus::Investigating),
             (8, IncidentStatus::Investigating),
+            (9, IncidentStatus::Investigating),
         ]
     );
 
@@ -172,8 +172,8 @@ async fn the_engine_output_keeps_a_state_that_no_agent_changes_again() {
         "The network team blocked the address by hand."
     );
     // The detections, the entities, the techniques, and the severity are from the engine.
-    assert_eq!(later.detections.len(), 8);
-    assert_eq!(later.attack.len(), 7);
+    assert_eq!(later.detections.len(), 9);
+    assert_eq!(later.attack.len(), 8);
     assert_eq!(later.severity, Severity::Critical);
     assert!(
         later
@@ -206,7 +206,7 @@ async fn a_closed_incident_is_forgotten_by_the_engine_and_a_new_incident_starts(
     let second = app.replay(events_after_the_spray()).await.unwrap();
     assert_eq!(second.incidents.len(), 1);
     assert_ne!(second.incidents[0].id, incident.id);
-    assert_eq!(second.incidents[0].detections.len(), 7);
+    assert_eq!(second.incidents[0].detections.len(), 8);
     let stored = app.incidents().get(incident.id).await.unwrap().unwrap();
     assert_eq!(stored.status, IncidentStatus::FalsePositive);
     assert_eq!(stored.detections.len(), 1);
@@ -214,7 +214,7 @@ async fn a_closed_incident_is_forgotten_by_the_engine_and_a_new_incident_starts(
 
 #[tokio::test]
 async fn the_events_of_a_detection_go_to_the_monitor_for_the_graph() {
-    for (setting, expected) in [("detected", 17_u64), ("all", 648), ("none", 0)] {
+    for (setting, expected) in [("detected", 18_u64), ("all", 648), ("none", 0)] {
         let starter = Starter::new();
         let config = starter.config_with(|text| {
             replace_once(
@@ -227,7 +227,7 @@ async fn the_events_of_a_detection_go_to_the_monitor_for_the_graph() {
 
         let report = app.replay(fixtures::artex_style_attack()).await.unwrap();
 
-        assert_eq!(report.detections.len(), 8, "{setting}");
+        assert_eq!(report.detections.len(), 9, "{setting}");
         let progress = app.progress();
         assert_eq!(progress.monitor_events, expected, "{setting}");
         assert_eq!(progress.monitor_events_dropped, 0, "{setting}");

@@ -16,6 +16,7 @@ mod grpc;
 mod incidents;
 mod limits;
 mod notifications;
+mod reverts;
 mod serve;
 mod slack;
 mod stream;

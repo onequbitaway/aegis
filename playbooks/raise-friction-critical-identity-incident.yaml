@@ -1,0 +1,58 @@
+# Raise friction in the tenant during a critical identity incident.
+#
+# A friction action does not act on the attacker. It changes a setting of your own tenant
+# through Microsoft Graph, so that the next step of the attack is more difficult while the
+# security team examines the incident. This playbook stops user consent to applications.
+# An attacker then cannot get a new consent grant from a user.
+#
+# The change applies to all users of the tenant. Thus:
+#
+#   - The trigger names the tenants in which you permit this playbook. Replace the example
+#     tenant with your tenant. The playbook runs for no other tenant.
+#   - The step has a timed revert. If no person confirms the change in 2 hours, AEGIS
+#     writes the earlier setting again.
+#   - The action is a custom action, so the default policy requires approval for it.
+#
+# The step needs the Microsoft Graph connector with the application permission
+# Policy.ReadWrite.Authorization, and a dispatcher with a revert store.
+name: raise-friction-critical-identity-incident
+description: >-
+  Stop user consent to applications in the tenant during a critical identity incident,
+  with a timed revert, and tell the security team.
+trigger:
+  min_severity: critical
+  techniques_any:
+    - T1528      # Steal Application Access Token: consent to privileged scopes
+    - T1098.001  # Additional Cloud Credentials
+    - T1098.003  # Additional Cloud Roles
+  tenants:
+    - tenant.example.com
+steps:
+  - id: restrict-user-consent
+    action:
+      custom: restrict_user_consent
+    target: incident_tenant
+    revert_after: 2h
+    reason: >-
+      Incident {{incident.id}} ({{incident.severity}}): an identity attack is in progress
+      in the tenant {{target.id}} ({{incident.techniques}}). Stop user consent to
+      applications. AEGIS writes the earlier setting again after 2 hours, unless a person
+      confirms the change.
+    continue_on_error: true
+
+  - id: notify-security-team
+    action: notify
+    target:
+      fixed:
+        kind: other
+        id: security-operations
+        name: Security operations channel
+    parameters:
+      title: "{{incident.title}}"
+      severity: "{{incident.severity}}"
+      techniques: "{{incident.techniques}}"
+    reason: >-
+      Incident {{incident.id}} ({{incident.severity}}): AEGIS stops user consent to
+      applications in the tenant {{incident.tenant}} for 2 hours. Users cannot consent to
+      a new application in this time. Confirm the change to keep it, or revert it now.
+    continue_on_error: true

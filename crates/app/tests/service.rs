@@ -110,7 +110,7 @@ async fn the_service_processes_the_file_source_end_to_end_and_stops_on_shutdown(
                 let Some(incident) = the_incident(&app).await else {
                     return false;
                 };
-                incident.detections.len() == 8
+                incident.detections.len() == 9
                     && incident.status == IncidentStatus::Investigating
                     && responder_actions(&app) == expected_responder_actions()
                     && has_each_result(&incident)
@@ -148,13 +148,13 @@ async fn the_service_processes_the_file_source_end_to_end_and_stops_on_shutdown(
         progress.events_processed,
         fixtures::ATTACK_LOG_EVENTS as u64
     );
-    assert_eq!(progress.detections, 8);
+    assert_eq!(progress.detections, 9);
     assert_eq!(progress.playbook_runs, 4);
 
     let incident = the_incident(&app).await.unwrap();
     assert_eq!(incident.severity, Severity::Critical);
     assert_eq!(incident.status, IncidentStatus::Investigating);
-    assert_eq!(incident.detections.len(), 8);
+    assert_eq!(incident.detections.len(), 9);
 
     // Each action was a dry run. Nothing changed.
     let actions = app.actions().records();
@@ -175,7 +175,7 @@ async fn the_service_processes_the_file_source_end_to_end_and_stops_on_shutdown(
     let records = app.audit().read(1, 100_000).await.unwrap();
     assert_eq!(records.len() as u64, verification.checked);
     let count = |kind: AuditKind| records.iter().filter(|record| record.kind == kind).count();
-    assert_eq!(count(AuditKind::Detection), 8);
+    assert_eq!(count(AuditKind::Detection), 9);
     assert_eq!(count(AuditKind::ActionProposed), actions.len());
     assert_eq!(count(AuditKind::ActionExecuted), actions.len());
 
@@ -225,13 +225,13 @@ async fn a_monitoring_session_stops_at_the_end_of_the_sources_and_takes_no_actio
         summary.progress.events_processed,
         fixtures::ATTACK_LOG_EVENTS as u64
     );
-    assert_eq!(summary.progress.detections, 8);
+    assert_eq!(summary.progress.detections, 9);
     assert_eq!(summary.progress.incident_updates, 7);
     assert_eq!(summary.progress.playbook_runs, 0);
 
     // The bus has each detection and each state of the incident, in order.
     let mut rule_ids = Vec::new();
-    for _ in 0..8 {
+    for _ in 0..9 {
         let message = tokio::time::timeout(WAIT, detections.next())
             .await
             .unwrap()
@@ -241,7 +241,8 @@ async fn a_monitoring_session_stops_at_the_end_of_the_sources_and_takes_no_actio
         rule_ids.push(message.decode::<Detection>().unwrap().rule_id);
     }
     assert_eq!(rule_ids[0], "aegis.velocity.sign_in_burst");
-    assert_eq!(rule_ids[7], "0c9e4f7a-2b6d-4e18-a3f5-7d21c6b8e940");
+    assert_eq!(rule_ids[7], "aegis.velocity.machine_cadence");
+    assert_eq!(rule_ids[8], "0c9e4f7a-2b6d-4e18-a3f5-7d21c6b8e940");
     let mut states = Vec::new();
     for _ in 0..7 {
         let message = tokio::time::timeout(WAIT, incidents.next())
@@ -256,14 +257,14 @@ async fn a_monitoring_session_stops_at_the_end_of_the_sources_and_takes_no_actio
             .iter()
             .map(|state| state.detections.len())
             .collect::<Vec<_>>(),
-        [1, 2, 3, 4, 6, 7, 8]
+        [1, 2, 3, 4, 6, 8, 9]
     );
     assert_eq!(states[6].severity, Severity::Critical);
 
     // A monitoring session has no Responder: no action request went to the dispatcher.
     assert_eq!(app.actions().records(), []);
     let incident = the_incident(&app).await.unwrap();
-    assert_eq!(incident.detections.len(), 8);
+    assert_eq!(incident.detections.len(), 9);
     let records = app.audit().read(1, 100_000).await.unwrap();
     assert!(
         records

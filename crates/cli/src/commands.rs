@@ -31,7 +31,7 @@ const DELIVERY_LIMIT: Duration = Duration::from_secs(30);
 const MONITOR_SOURCE: &str = "events";
 
 /// Returns the directory that the relative paths of a configuration file start at.
-fn base_dir(config_file: &Path) -> anyhow::Result<PathBuf> {
+pub(crate) fn base_dir(config_file: &Path) -> anyhow::Result<PathBuf> {
     let absolute = std::path::absolute(config_file).with_context(|| {
         format!(
             "cannot find the directory of the configuration file {}",
@@ -44,7 +44,7 @@ fn base_dir(config_file: &Path) -> anyhow::Result<PathBuf> {
 }
 
 /// Reads a configuration file and applies the `AEGIS__` environment variables.
-fn load(config_file: &Path) -> anyhow::Result<Config> {
+pub(crate) fn load(config_file: &Path) -> anyhow::Result<Config> {
     Ok(Config::load_with_env(config_file)?)
 }
 
@@ -90,6 +90,18 @@ fn api_address(app: &App) -> String {
     if let Some(api) = &app.settings().api {
         return api.bind.to_string();
     }
+    "off".to_owned()
+}
+
+/// Returns the address in `decoy.bind` if `aegis run` starts the decoy service, or `off`.
+fn decoy_address(app: &App) -> String {
+    #[cfg(feature = "decoy")]
+    if app.runs_decoy()
+        && let Some(decoy) = &app.settings().decoy
+    {
+        return decoy.bind.to_string();
+    }
+    let _ = app;
     "off".to_owned()
 }
 
@@ -557,6 +569,14 @@ pub async fn config_check(config_file: &Path, format: Format) -> anyhow::Result<
                 {
                     problems.push(error.to_string());
                 }
+                // The decoy service that `aegis run` would start: the check reads the seed
+                // and each decoy key. It opens no socket.
+                #[cfg(feature = "decoy")]
+                if app.runs_decoy()
+                    && let Err(error) = app.check_decoy()
+                {
+                    problems.push(error.to_string());
+                }
                 // The summary is for a configuration that has no problem.
                 if problems.is_empty() {
                     let modules: Vec<&str> =
@@ -579,6 +599,15 @@ pub async fn config_check(config_file: &Path, format: Format) -> anyhow::Result<
                         "playbooks": app.playbooks().names(),
                         "connectors": app.action_registry().names(),
                         "sources": app.sources().names(),
+                        "decoy": decoy_address(&app),
+                        "timed_revert": app.settings().response.revert.as_ref().map_or_else(
+                            || "off".to_owned(),
+                            |revert| revert.store.display().to_string(),
+                        ),
+                        "evidence_archive": app.settings().evidence.as_ref().map_or_else(
+                            || "off".to_owned(),
+                            |evidence| evidence.path.display().to_string(),
+                        ),
                     });
                 }
                 app.close().await;

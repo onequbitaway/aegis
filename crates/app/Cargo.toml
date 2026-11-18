@@ -9,11 +9,13 @@ publish.workspace = true
 build = "build.rs"
 
 [features]
-default = ["postgres", "plugins", "otlp", "api"]
+default = ["postgres", "plugins", "otlp", "api", "decoy"]
 # The operator API: the `[api]` section and the module `aegis_app::api` (`aegis-api`).
 api = ["dep:aegis-api", "tokio/net", "tokio-util/rt"]
 # The gRPC services of the operator API.
 grpc = ["api", "aegis-api/grpc"]
+# The decoy service: the `[decoy]` section (`aegis-decoy`).
+decoy = ["dep:aegis-decoy", "tokio/net"]
 # PostgreSQL storage: `storage.kind = "postgres"` and `audit.kind = "postgres"`.
 postgres = ["dep:aegis-storage"]
 # WebAssembly connector plugins: the `[plugins]` section.
@@ -29,6 +31,7 @@ aegis-api = { workspace = true, optional = true }
 aegis-bus.workspace = true
 aegis-contracts.workspace = true
 aegis-core.workspace = true
+aegis-decoy = { workspace = true, optional = true }
 aegis-detect.workspace = true
 aegis-ingest.workspace = true
 aegis-memory.workspace = true
@@ -36,10 +39,12 @@ aegis-model.workspace = true
 aegis-plugin = { workspace = true, optional = true }
 aegis-policy.workspace = true
 aegis-respond.workspace = true
+aegis-share.workspace = true
 aegis-storage = { workspace = true, optional = true }
 async-trait.workspace = true
 chrono.workspace = true
 futures.workspace = true
+ipnet = { version = "2.12.2", features = ["serde"] }
 serde.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["fs"] }
@@ -54,7 +59,7 @@ prost = "0.14.5"
 # TLS needs HTTP/2.
 reqwest = { version = "0.13.5", default-features = false, features = ["http2", "json"] }
 tempfile = "3.27.0"
-tokio = { workspace = true, features = ["test-util"] }
+tokio = { workspace = true, features = ["io-util", "net", "test-util"] }
 uuid.workspace = true
 wiremock = "0.6.5"
 

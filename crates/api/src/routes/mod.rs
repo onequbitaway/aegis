@@ -25,6 +25,7 @@ mod audit;
 mod graph;
 mod incidents;
 mod playbooks;
+mod reverts;
 mod stream;
 mod system;
 
@@ -138,6 +139,36 @@ fn table() -> Vec<Entry> {
             "/approvals/{id}/decision",
             APPROVE,
             post(approvals::decide),
+        ),
+        entry(
+            "GET",
+            "/reverts",
+            ops::READ_APPROVALS,
+            get(reverts::pending),
+        ),
+        entry(
+            "POST",
+            "/reverts/{action_id}/confirm",
+            APPROVE,
+            post(reverts::confirm),
+        ),
+        entry(
+            "POST",
+            "/reverts/{action_id}/extend",
+            APPROVE,
+            post(reverts::extend),
+        ),
+        entry(
+            "POST",
+            "/reverts/{action_id}/cancel",
+            APPROVE,
+            post(reverts::cancel),
+        ),
+        entry(
+            "POST",
+            "/actions/{id}/revert",
+            APPROVE,
+            post(reverts::revert_action),
         ),
         entry("GET", "/graph/nodes", VIEW_INCIDENTS, get(graph::nodes)),
         entry("GET", "/graph/nodes/{id}", VIEW_INCIDENTS, get(graph::node)),
@@ -280,6 +311,10 @@ mod tests {
             posts,
             [
                 ("/approvals/{id}/decision", APPROVE),
+                ("/reverts/{action_id}/confirm", APPROVE),
+                ("/reverts/{action_id}/extend", APPROVE),
+                ("/reverts/{action_id}/cancel", APPROVE),
+                ("/actions/{id}/revert", APPROVE),
                 ("/goal", ADMINISTER),
                 ("/playbooks/{name}/runs", RUN_PLAYBOOKS),
             ]

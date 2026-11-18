@@ -27,10 +27,13 @@ steps:
     target:
       each_entity: user
     max_targets: 5
+    # A disabled account stops the work of its owner. If no person confirms the action in
+    # 4 hours, AEGIS enables the account again.
+    revert_after: 4h
     reason: >-
       Incident {{incident.id}} ({{incident.severity}}): disable the account
-      {{target.name}} until its owner sets a new password. The operator can enable it
-      again.
+      {{target.name}} until its owner sets a new password. AEGIS enables the account
+      again after 4 hours, unless a person confirms the action.
     continue_on_error: true
 
   - id: open-ticket
@@ -45,5 +48,6 @@ steps:
       priority: "{{incident.severity}}"
     reason: >-
       Incident {{incident.id}}: reset the password and examine the authentication methods
-      of each account in the incident.
+      of each account in the incident. Confirm each disabled account that must stay
+      disabled. AEGIS enables an account with no confirmation after 4 hours.
     continue_on_error: true

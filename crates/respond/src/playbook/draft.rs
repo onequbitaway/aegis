@@ -5,6 +5,7 @@
 //! approval, and the audit log apply to each step.
 
 use std::collections::BTreeMap;
+use std::time::Duration;
 
 use aegis_contracts::Error;
 use aegis_contracts::action::ActionKind;
@@ -20,10 +21,15 @@ use serde_json::{Value, json};
 use super::{
     MAX_STEPS, Playbook, PlaybookOrigin, Step, TargetSelector, Trigger, check_target_kind,
 };
+use crate::friction;
 use crate::names::{snake_name, truncate};
+use crate::revert::{MAX_REVERT_AFTER_SECONDS, MIN_REVERT_AFTER_SECONDS};
 
 /// The default maximum number of steps in a response draft.
 pub const DEFAULT_MAX_DRAFT_STEPS: usize = 8;
+
+/// The default time of the timed revert of a friction step in a response draft: 4 hours.
+pub const DEFAULT_FRICTION_REVERT_AFTER: Duration = Duration::from_secs(4 * 60 * 60);
 
 /// The only parameter that a response draft can set.
 const KEY_ID_PARAMETER: &str = "key_id";
@@ -68,7 +74,19 @@ pub struct DraftOptions {
     /// The default is all types but custom types and `deploy_honeytoken`. The target of a
     /// draft step is an entity of the incident. A real entity is not a place for a decoy,
     /// because each event on that entity would then be a honeytoken trip.
+    ///
+    /// A draft cannot use a custom type, with one exception: the friction actions. Refer
+    /// to [`friction`](crate::friction). A friction action changes a setting for all users
+    /// of the tenant, so the default does not permit it. To permit one, add it to this
+    /// list, for example [`friction::restrict_user_consent`]. All other custom types in
+    /// this list have no effect.
     pub allowed_actions: Vec<ActionKind>,
+    /// The time of the timed revert that each friction step of a draft gets.
+    ///
+    /// The default is [`DEFAULT_FRICTION_REVERT_AFTER`]. A friction step of a draft always
+    /// has a timed revert, and the model cannot change this time. A value out of the range
+    /// from 1 second to 30 days has the effect of the nearest limit.
+    pub friction_revert_after: Duration,
 }
 
 impl Default for DraftOptions {
@@ -79,8 +97,29 @@ impl Default for DraftOptions {
                 .into_iter()
                 .filter(|action| *action != ActionKind::DeployHoneytoken)
                 .collect(),
+            friction_revert_after: DEFAULT_FRICTION_REVERT_AFTER,
         }
     }
+}
+
+/// Returns the friction actions that the options permit, by name.
+fn permitted_friction(options: &DraftOptions) -> Vec<&'static str> {
+    friction::FRICTION_ACTIONS
+        .into_iter()
+        .filter(|name| {
+            options
+                .allowed_actions
+                .contains(&ActionKind::Custom((*name).to_owned()))
+        })
+        .collect()
+}
+
+/// Returns the time of the timed revert of a friction step, in seconds.
+fn friction_revert_seconds(options: &DraftOptions) -> u64 {
+    options
+        .friction_revert_after
+        .as_secs()
+        .clamp(MIN_REVERT_AFTER_SECONDS, MAX_REVERT_AFTER_SECONDS)
 }
 
 /// Why [`draft_response`] did not return a playbook.
@@ -205,12 +244,26 @@ fn step_limit(options: &DraftOptions) -> usize {
 
 /// Returns the instructions for the model.
 fn system_prompt(options: &DraftOptions) -> String {
-    let actions: Vec<String> = options
+    let mut actions: Vec<String> = options
         .allowed_actions
         .iter()
         .filter(|action| KNOWN_ACTIONS.contains(action))
         .map(snake_name)
         .collect();
+    let friction_actions = permitted_friction(options);
+    actions.extend(friction_actions.iter().map(ToString::to_string));
+    let friction_rule = if friction_actions.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "\n9. These actions are friction actions: {names}. A friction action changes a \
+setting for all users of the tenant. Use one only for a critical incident with an identity \
+attack that is in progress. Its target must be {{\"kind\": \"tenant\", \"id\": \"<the \
+\"tenant\" of the incident>\"}}. AEGIS reverts a friction action after a time limit, unless a \
+person confirms it.",
+            names = friction_actions.join(", "),
+        )
+    };
     format!(
         "You are the response planner of AEGIS, a defensive security system. You plan \
 containment actions in the environment of the operator.\n\
@@ -233,7 +286,7 @@ operator can undo.\n\
 No other parameter is permitted.\n\
 7. Plan only defensive actions on the entities of the incident. Never plan an action against \
 a system that the operator does not own.\n\
-8. If no action is necessary, reply with an empty \"steps\" list.",
+8. If no action is necessary, reply with an empty \"steps\" list.{friction_rule}",
         actions = actions.join(", "),
         max_steps = step_limit(options),
     )
@@ -376,9 +429,11 @@ fn validate_step(
     incident: &Incident,
     options: &DraftOptions,
 ) -> Result<Step, DraftError> {
+    // A friction action is the only custom action that a draft can name.
     let action = serde_json::from_value::<ActionKind>(Value::String(raw.action.clone()))
         .ok()
         .filter(|action| KNOWN_ACTIONS.contains(action))
+        .or_else(|| friction::from_name(&raw.action))
         .ok_or_else(|| DraftError::UnknownAction {
             step: position,
             action: truncate(&raw.action, MAX_ECHO),
@@ -389,6 +444,7 @@ fn validate_step(
             action: snake_name(&action),
         });
     }
+    let is_friction = friction::is_friction(&action);
     let outside = || DraftError::TargetOutsideIncident {
         step: position,
         kind: truncate(&raw.target.kind, MAX_ECHO),
@@ -396,16 +452,35 @@ fn validate_step(
     };
     let kind = serde_json::from_value::<EntityKind>(Value::String(raw.target.kind.clone()))
         .map_err(|_| outside())?;
+    // The target of a friction action is the tenant of the incident. The tenant is not
+    // always in the entity list, so the tenant field of the incident also gives it.
+    let incident_tenant = || {
+        let is_tenant = is_friction
+            && kind == EntityKind::Tenant
+            && incident.tenant.as_deref() == Some(raw.target.id.as_str());
+        is_tenant.then(|| EntityRef::new(EntityKind::Tenant, raw.target.id.clone()))
+    };
     let target: EntityRef = incident
         .entities
         .iter()
         .find(|entity| entity.kind == kind && entity.id == raw.target.id)
         .cloned()
+        .or_else(incident_tenant)
         .ok_or_else(outside)?;
     check_target_kind(&action, target.kind).map_err(|reason| DraftError::TargetKindMismatch {
         step: position,
         reason,
     })?;
+    if is_friction && target.kind != EntityKind::Tenant {
+        return Err(DraftError::TargetKindMismatch {
+            step: position,
+            reason: format!(
+                "the friction action {} needs the tenant of the incident as its target, not {}",
+                snake_name(&action),
+                snake_name(&target.kind)
+            ),
+        });
+    }
     let reason = raw.reason.trim();
     if reason.is_empty() {
         return Err(DraftError::MissingReason { step: position });
@@ -419,6 +494,7 @@ fn validate_step(
         reason: truncate(reason, MAX_REASON),
         continue_on_error: true,
         max_targets: 1,
+        revert_after: is_friction.then(|| friction_revert_seconds(options)),
         literal: true,
     })
 }
@@ -497,6 +573,9 @@ pub async fn draft_response(
 ///
 /// - Each action must be a known action type that the options permit. A custom action is
 ///   not permitted. The default options also do not permit `deploy_honeytoken`.
+/// - A friction action is permitted only if the operator adds it to
+///   [`DraftOptions::allowed_actions`]. Its target must be the tenant of the incident. The
+///   step gets a timed revert of [`DraftOptions::friction_revert_after`].
 /// - Each target must be an entity of the incident, of a type that the action can change.
 /// - The plan must have 1 to [`DraftOptions::max_steps`] steps and no fields that are not
 ///   known.

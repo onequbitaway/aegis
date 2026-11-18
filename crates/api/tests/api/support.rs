@@ -9,13 +9,14 @@ use std::time::Duration;
 
 use aegis_agents::AgentRuntime;
 use aegis_api::{
-    ApiConfig, ApiParts, ApiState, ApprovalActions, ApprovalDecision, PrincipalConfig,
+    ApiConfig, ApiParts, ApiState, ApprovalActions, ApprovalDecision, FloodStatus, PrincipalConfig,
+    RevertActions, StatusSource, SystemStatus,
 };
 use aegis_contracts::action::{
     ActionDisposition, ActionKind, ActionOutcome, ActionRequest, ActionStatus,
 };
 use aegis_contracts::agent::AgentContext;
-use aegis_contracts::common::{ApprovalId, EntityKind, EntityRef, IncidentId, Severity};
+use aegis_contracts::common::{ActionId, ApprovalId, EntityKind, EntityRef, IncidentId, Severity};
 use aegis_contracts::detection::{AttackTechnique, Detection, DetectionTier, Verdict};
 use aegis_contracts::incident::{Incident, IncidentStatus, IncidentStore, TimelineEntry};
 use aegis_contracts::policy::{
@@ -25,7 +26,10 @@ use aegis_contracts::policy::{
 use aegis_contracts::{Error, Result};
 use aegis_core::{Module, ModuleSet};
 use aegis_policy::{Permission, Rbac, RbacConfig};
-use aegis_respond::{ActionRegistry, Dispatcher, Playbook, PlaybookEngine};
+use aegis_respond::{
+    ActionRegistry, Dispatcher, MemoryRevertStore, PendingRevert, Playbook, PlaybookEngine,
+    RevertScheduler,
+};
 use aegis_testkit::{
     DispatchMode, MemoryApprovals, MemoryAuditLog, MemoryBus, MemoryGraph, MemoryIncidents,
     RecordingConnector, RecordingDispatcher, ScriptedModel, StaticPolicy,
@@ -201,6 +205,80 @@ impl ApprovalActions for FakeApprovalActions {
     }
 }
 
+/// The revert path of the tests: the real scheduler and the real dispatcher, with the
+/// in-memory services. The composition root has the same calls, and it also checks the
+/// permission of the principal.
+pub struct TestReverts {
+    pub scheduler: RevertScheduler,
+    pub dispatcher: Arc<Dispatcher>,
+}
+
+#[async_trait]
+impl RevertActions for TestReverts {
+    fn enabled(&self) -> bool {
+        true
+    }
+
+    async fn pending(&self) -> Result<Vec<PendingRevert>> {
+        self.scheduler.pending().await
+    }
+
+    async fn confirm(&self, action_id: ActionId, principal: &Principal) -> Result<PendingRevert> {
+        self.scheduler.confirm(action_id, principal).await
+    }
+
+    async fn extend(
+        &self,
+        action_id: ActionId,
+        principal: &Principal,
+        extension: Duration,
+    ) -> Result<PendingRevert> {
+        self.scheduler.extend(action_id, principal, extension).await
+    }
+
+    async fn cancel(
+        &self,
+        action_id: ActionId,
+        principal: &Principal,
+    ) -> Result<ActionDisposition> {
+        self.scheduler.cancel(action_id, principal).await
+    }
+
+    async fn revert(
+        &self,
+        action_id: ActionId,
+        principal: &Principal,
+        reason: &str,
+    ) -> Result<ActionDisposition> {
+        self.dispatcher.revert(action_id, principal, reason).await
+    }
+}
+
+/// The status data of the tests: fixed counts, and one more field.
+pub struct TestStatus;
+
+/// The flood counts that [`TestStatus`] gives.
+pub const FLOOD: FloodStatus = FloodStatus {
+    suppressed_matches: 41,
+    repeat_detections: 2,
+    triage_quota_denials: 7,
+    coalesced_incident_updates: 13,
+};
+
+#[async_trait]
+impl StatusSource for TestStatus {
+    async fn status(&self) -> SystemStatus {
+        let mut sections = BTreeMap::new();
+        sections.insert("decoy".to_owned(), serde_json::json!({ "requests": 5 }));
+        // A field of the route itself. The route keeps its own value.
+        sections.insert("version".to_owned(), serde_json::json!("not-the-version"));
+        SystemStatus {
+            flood: FLOOD,
+            sections,
+        }
+    }
+}
+
 /// The in-memory services behind one API under test.
 pub struct TestApi {
     pub incidents: Arc<MemoryIncidents>,
@@ -211,6 +289,11 @@ pub struct TestApi {
     pub agents: Arc<AgentRuntime>,
     pub actions: Arc<FakeApprovalActions>,
     pub firewall: Arc<RecordingConnector>,
+    /// The dispatcher of the playbooks and of the reverts. Its policy permits each action.
+    pub dispatcher: Arc<Dispatcher>,
+    /// The scheduler of the timed reverts of `dispatcher`. No task runs it: a test calls
+    /// `run_due`.
+    pub scheduler: RevertScheduler,
     pub state: ApiState,
 }
 
@@ -252,14 +335,18 @@ impl TestApi {
         ));
         let mut registry = ActionRegistry::new();
         registry.register(firewall.clone()).unwrap();
-        let dispatcher = Dispatcher::builder(
-            Arc::new(registry),
-            Arc::new(StaticPolicy::AllowAll),
-            approvals.clone(),
-            audit.clone(),
-        )
-        .build();
-        let mut playbooks = PlaybookEngine::new(Arc::new(dispatcher));
+        let dispatcher = Arc::new(
+            Dispatcher::builder(
+                Arc::new(registry),
+                Arc::new(StaticPolicy::AllowAll),
+                approvals.clone(),
+                audit.clone(),
+            )
+            .revert_store(Arc::new(MemoryRevertStore::default()))
+            .build(),
+        );
+        let scheduler = RevertScheduler::new(dispatcher.clone()).unwrap();
+        let mut playbooks = PlaybookEngine::new(dispatcher.clone());
         playbooks
             .add(Playbook::from_yaml("block-spray-source.yaml", PLAYBOOK).unwrap())
             .unwrap();
@@ -277,6 +364,10 @@ impl TestApi {
             approval_actions: actions.clone(),
             modules: ModuleSet::new([Module::Detection, Module::Responder, Module::Api]).unwrap(),
         })
+        .with_reverts(Arc::new(TestReverts {
+            scheduler: scheduler.clone(),
+            dispatcher: dispatcher.clone(),
+        }))
         .with_env(env(extra));
         Self {
             incidents,
@@ -287,6 +378,8 @@ impl TestApi {
             agents,
             actions,
             firewall,
+            dispatcher,
+            scheduler,
             state,
         }
     }

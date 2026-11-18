@@ -16,6 +16,7 @@ fn concrete(path: &str) -> String {
     format!(
         "/api/v1{}",
         path.replace("{id}", id)
+            .replace("{action_id}", id)
             .replace("{name}", "block-spray-source")
     )
 }
@@ -43,7 +44,7 @@ const SINGLE_ROLE_TOKENS: [&str; 6] = [VIEWER, AUDITOR, APPROVER, OPERATOR, ADMI
 #[test]
 fn each_route_needs_the_documented_permission() {
     use Permission::{Administer, ApproveActions, RunPlaybooks, ViewAudit, ViewIncidents};
-    let expected: [(&str, &str, &[Permission]); 19] = [
+    let expected: [(&str, &str, &[Permission]); 24] = [
         ("GET", "/session", &[]),
         ("GET", "/status", &[ViewIncidents]),
         ("GET", "/incidents", &[ViewIncidents]),
@@ -53,6 +54,11 @@ fn each_route_needs_the_documented_permission() {
         ("GET", "/approvals", &[ViewIncidents, ApproveActions]),
         ("GET", "/approvals/{id}", &[ViewIncidents, ApproveActions]),
         ("POST", "/approvals/{id}/decision", &[ApproveActions]),
+        ("GET", "/reverts", &[ViewIncidents, ApproveActions]),
+        ("POST", "/reverts/{action_id}/confirm", &[ApproveActions]),
+        ("POST", "/reverts/{action_id}/extend", &[ApproveActions]),
+        ("POST", "/reverts/{action_id}/cancel", &[ApproveActions]),
+        ("POST", "/actions/{id}/revert", &[ApproveActions]),
         ("GET", "/graph/nodes", &[ViewIncidents]),
         ("GET", "/graph/nodes/{id}", &[ViewIncidents]),
         ("GET", "/graph/nodes/{id}/neighbors", &[ViewIncidents]),
@@ -76,7 +82,7 @@ async fn each_route_answers_401_without_a_token_and_with_an_unknown_token() {
     let api = TestApi::new();
     let router = api.router();
     let routes = route_permissions();
-    assert!(routes.len() >= 18, "{} routes", routes.len());
+    assert_eq!(routes.len(), 24);
     for route in routes {
         let path = concrete(route.path);
         for token in [None, Some(UNKNOWN), Some("")] {
@@ -141,8 +147,8 @@ async fn each_route_answers_403_to_a_principal_without_the_permission() {
             checked += 1;
         }
     }
-    // Each of the protected routes refuses four or five of the six principals.
-    assert!(checked >= 18 * 4, "{checked} refusals");
+    // Each of the 23 protected routes refuses four or five of the six principals.
+    assert!(checked >= 23 * 4, "{checked} refusals");
     assert!(api.actions.calls().is_empty());
     assert!(api.audit.records().is_empty());
 }
@@ -171,7 +177,7 @@ async fn a_principal_with_the_permission_passes_the_guard_of_each_route() {
             checked += 1;
         }
     }
-    assert!(checked >= 18, "{checked} checks");
+    assert!(checked >= 23, "{checked} checks");
 }
 
 #[tokio::test]
