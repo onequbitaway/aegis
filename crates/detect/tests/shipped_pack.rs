@@ -273,6 +273,13 @@ fn a_successful_sign_in_with_a_legacy_mail_protocol_is_suspicious() {
         "pop3",
         "Authenticated SMTP",
         "Exchange ActiveSync",
+        // The values that the Entra ID source writes.
+        "authenticated_smtp",
+        "exchange_active_sync",
+        "exchange_web_services",
+        "mapi_over_http",
+        "auto_discover",
+        "autodiscover",
     ] {
         let detections = detect(&pack, &sign_in(protocol));
         assert_eq!(detections.len(), 1, "{protocol}");

@@ -20,11 +20,17 @@ detection:
       - pop3
       - smtp
       - authenticated smtp
+      - authenticated_smtp
       - mapi
+      - mapi over http
+      - mapi_over_http
       - exchange activesync
       - exchange_activesync
+      - exchange_active_sync
       - exchange web services
+      - exchange_web_services
       - autodiscover
+      - auto_discover
   condition: selection
 falsepositives:
   - A device or an application that cannot use modern authentication.
