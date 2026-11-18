@@ -1,6 +1,6 @@
 //! In-memory implementations of the AEGIS contracts and shared test data.
 //!
-//! Each workstream tests against these implementations. The implementations obey the rules
+//! Each crate tests against these implementations. The implementations obey the rules
 //! in the contract documentation, so a test that passes here also describes the real
 //! subsystem.
 //!

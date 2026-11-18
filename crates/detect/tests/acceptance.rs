@@ -1,4 +1,4 @@
-//! The acceptance test of the detection workstream: a replay of the recorded attack log
+//! The acceptance test of the detection engine: a replay of the recorded attack log
 //! through the engine with the shipped rule pack.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 

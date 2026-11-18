@@ -27,10 +27,10 @@ use uuid::Uuid;
 pub const DATABASE_URL_VARIABLE: &str = "AEGIS_TEST_DATABASE_URL";
 
 /// The name of the image that the tests build.
-const IMAGE: &str = "aegis-w8a-storage-postgres:test";
+const IMAGE: &str = "aegis-test-postgres:test";
 
 /// The start of the name of each container that the tests start.
-const CONTAINER_PREFIX: &str = "aegis-w8a-storage-test";
+const CONTAINER_PREFIX: &str = "aegis-test-storage";
 
 /// The label of each container that the tests start.
 const CONTAINER_LABEL: &str = "aegis.test=storage";

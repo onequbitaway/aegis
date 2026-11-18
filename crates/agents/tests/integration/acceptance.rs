@@ -1,4 +1,4 @@
-//! The acceptance tests of the workstream: an incident goes through the agents.
+//! The acceptance tests of the agent runtime: an incident goes through the agents.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use aegis_agents::agents::{REPORT_SUBJECT, ReportDocument};

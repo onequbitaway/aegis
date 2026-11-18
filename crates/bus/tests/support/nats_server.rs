@@ -5,7 +5,7 @@
 //! Tests that restart the server, or that need a special server configuration, call
 //! [`NatsServer::start`]. Those tests always need Docker.
 //!
-//! Each container has a unique name with the prefix `aegis-w8b-`, a random free port on the
+//! Each container has a unique name with the prefix `aegis-test-bus-`, a random free port on the
 //! local host, and a limited life. The helper removes the container when the last test
 //! that uses it ends.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
@@ -23,7 +23,7 @@ pub const URL_VARIABLE: &str = "AEGIS_TEST_NATS_URL";
 pub const IMAGE_VARIABLE: &str = "AEGIS_TEST_NATS_IMAGE";
 
 const DEFAULT_IMAGE: &str = "nats:2.12-alpine";
-const CONTAINER_PREFIX: &str = "aegis-w8b-";
+const CONTAINER_PREFIX: &str = "aegis-test-bus-";
 const NATS_PORT: u16 = 4222;
 /// A container stops itself after this time, also when the test process cannot remove it.
 const CONTAINER_LIFE_SECONDS: &str = "900";
@@ -208,7 +208,7 @@ impl Container {
             "--name",
             &name,
             "--label",
-            "aegis.workstream=w8b-bus-tests",
+            "aegis.test=bus",
             "--publish",
             &publish,
             // `timeout` ends the server after a fixed time, so a container that a killed

@@ -5,8 +5,8 @@
 //!
 //! # Stability
 //!
-//! The contracts are frozen. Do not change this crate in a workstream change. Send a change
-//! request to the project lead.
+//! The contracts are frozen. Do not change this crate as a part of other work. Open an
+//! issue first, because a change here affects all crates.
 //!
 //! # Modules
 //!

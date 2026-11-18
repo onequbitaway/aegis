@@ -329,7 +329,7 @@ cargo test -p aegis-bus --features docker-tests
 
 The `docker-tests` feature needs Docker. The tests start `nats:2.12-alpine` containers with
 JetStream on random free ports of the local host. The container names start with
-`aegis-w8b-`. The tests remove the containers. A container also stops itself after 15
+`aegis-test-bus-`. The tests remove the containers. A container also stops itself after 15
 minutes.
 
 - `AEGIS_TEST_NATS_URL`: the URL of an existing NATS server with JetStream. The tests that
