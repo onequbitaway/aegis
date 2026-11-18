@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<meta name="referrer" content="no-referrer">
+<title>AEGIS console</title>
+<link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/assets/console.css">
+<script type="module" src="/assets/js/main.js"></script>
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to the content</a>
+<header class="top">
+  <p class="brand">AEGIS</p>
+  <nav aria-label="Views">
+    <ul class="tabs" id="tabs">
+      <li><a href="#/incidents" data-tab="incidents">Incidents</a></li>
+      <li><a href="#/activity" data-tab="activity">Activity</a></li>
+      <li><a href="#/approvals" data-tab="approvals">Approvals</a></li>
+      <li><a href="#/graph" data-tab="graph">Graph</a></li>
+      <li><a href="#/audit" data-tab="audit">Audit</a></li>
+    </ul>
+  </nav>
+  <div class="session" id="session"></div>
+</header>
+<p class="notice" id="notice" role="status" aria-live="polite"></p>
+<main id="main" tabindex="-1">
+  <noscript><p>The console needs JavaScript.</p></noscript>
+</main>
+</body>
+</html>

@@ -1,0 +1,540 @@
+/* The style of the AEGIS console. Light and dark themes follow the system setting. */
+
+:root {
+  color-scheme: light dark;
+  --bg: #f6f7f9;
+  --surface: #ffffff;
+  --text: #16202b;
+  --muted: #4a5a6a;
+  --border: #c3ccd6;
+  --accent: #1d4f91;
+  --accent-text: #ffffff;
+  --focus: #b3470d;
+  --ok: #17603a;
+  --warn: #7a4a00;
+  --bad: #a11a1a;
+  --badge-bg: #e7ebf0;
+  --critical-bg: #7d1414;
+  --high-bg: #a13b0c;
+  --medium-bg: #6b5300;
+  --low-bg: #245a8c;
+  --info-bg: #4a5a6a;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #10161d;
+    --surface: #19222c;
+    --text: #e8edf2;
+    --muted: #a9b6c3;
+    --border: #3b4856;
+    --accent: #8fbcf5;
+    --accent-text: #0b1118;
+    --focus: #ffb37a;
+    --ok: #7fd6a4;
+    --warn: #f0c060;
+    --bad: #ff9a9a;
+    --badge-bg: #2a3643;
+    --critical-bg: #b32424;
+    --high-bg: #b3520f;
+    --medium-bg: #7a6100;
+    --low-bg: #2c6aa3;
+    --info-bg: #52626f;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  font-size: 100%;
+  line-height: 1.5;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+}
+
+a {
+  color: var(--accent);
+}
+
+:focus-visible {
+  outline: 3px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.skip-link {
+  position: absolute;
+  left: 0.5rem;
+  top: -4rem;
+  padding: 0.5rem 0.75rem;
+  background: var(--surface);
+  border: 2px solid var(--accent);
+  z-index: 10;
+}
+
+.skip-link:focus {
+  top: 0.5rem;
+}
+
+.top {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem 1.25rem;
+  padding: 0.5rem 1rem;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+}
+
+.brand {
+  margin: 0;
+  font-size: 1.15rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+}
+
+.tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.tabs a {
+  display: block;
+  padding: 0.4rem 0.75rem;
+  border-radius: 0.3rem;
+  color: var(--text);
+  text-decoration: none;
+}
+
+.tabs a:hover {
+  background: var(--badge-bg);
+}
+
+.tabs a[aria-current="page"] {
+  background: var(--accent);
+  color: var(--accent-text);
+  font-weight: 600;
+}
+
+.session {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  margin-left: auto;
+  font-size: 0.9rem;
+}
+
+.session form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.notice {
+  min-height: 1.5rem;
+  margin: 0;
+  padding: 0.25rem 1rem;
+  color: var(--muted);
+}
+
+.notice.error {
+  color: var(--bad);
+  font-weight: 600;
+}
+
+.notice.ok {
+  color: var(--ok);
+}
+
+main {
+  max-width: 78rem;
+  margin: 0 auto;
+  padding: 0.5rem 1rem 3rem;
+}
+
+main:focus {
+  outline: none;
+}
+
+h1 {
+  margin: 0.5rem 0;
+  font-size: 1.5rem;
+}
+
+h2 {
+  margin: 1.5rem 0 0.5rem;
+  font-size: 1.15rem;
+}
+
+h3 {
+  margin: 1rem 0 0.25rem;
+  font-size: 1rem;
+}
+
+p {
+  margin: 0.5rem 0;
+}
+
+.muted {
+  color: var(--muted);
+}
+
+.toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: 0.5rem 1rem;
+  margin: 0.5rem 0 1rem;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  font-size: 0.9rem;
+}
+
+input,
+select,
+textarea,
+button {
+  font: inherit;
+  color: inherit;
+}
+
+input,
+select,
+textarea {
+  min-height: 2.25rem;
+  padding: 0.3rem 0.5rem;
+  background: var(--surface);
+  border: 1px solid var(--muted);
+  border-radius: 0.3rem;
+  max-width: 100%;
+}
+
+textarea {
+  width: 100%;
+  min-height: 3.5rem;
+}
+
+button {
+  min-height: 2.25rem;
+  padding: 0.3rem 0.9rem;
+  background: var(--surface);
+  border: 1px solid var(--muted);
+  border-radius: 0.3rem;
+  cursor: pointer;
+}
+
+button:hover {
+  background: var(--badge-bg);
+}
+
+button.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-text);
+  font-weight: 600;
+}
+
+button.danger {
+  border-color: var(--bad);
+  color: var(--bad);
+  font-weight: 600;
+}
+
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+button.link {
+  min-height: 0;
+  padding: 0;
+  background: none;
+  border: none;
+  color: var(--accent);
+  text-align: left;
+  text-decoration: underline;
+}
+
+.panel {
+  margin: 0 0 1rem;
+  padding: 0.75rem 1rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 0.4rem;
+}
+
+.table-wrap {
+  overflow-x: auto;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 0.4rem;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.92rem;
+}
+
+caption {
+  padding: 0.5rem 0.75rem;
+  text-align: left;
+  font-weight: 600;
+}
+
+th,
+td {
+  padding: 0.45rem 0.75rem;
+  border-top: 1px solid var(--border);
+  text-align: left;
+  vertical-align: top;
+  /* A long word breaks only when the cell has no other way to fit it. A wide table
+     scrolls in its wrapper. */
+  overflow-wrap: break-word;
+}
+
+thead th {
+  border-top: none;
+  white-space: nowrap;
+}
+
+.badge {
+  display: inline-block;
+  padding: 0.05rem 0.5rem;
+  background: var(--badge-bg);
+  border-radius: 0.75rem;
+  font-size: 0.82rem;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.badge.severity-critical {
+  background: var(--critical-bg);
+  color: #fff;
+}
+
+.badge.severity-high {
+  background: var(--high-bg);
+  color: #fff;
+}
+
+.badge.severity-medium {
+  background: var(--medium-bg);
+  color: #fff;
+}
+
+.badge.severity-low {
+  background: var(--low-bg);
+  color: #fff;
+}
+
+.badge.severity-informational {
+  background: var(--info-bg);
+  color: #fff;
+}
+
+.badge.good {
+  color: var(--ok);
+}
+
+.badge.bad {
+  color: var(--bad);
+}
+
+dl.facts {
+  display: grid;
+  grid-template-columns: minmax(7rem, max-content) 1fr;
+  gap: 0.2rem 1rem;
+  margin: 0.5rem 0;
+}
+
+dl.facts dt {
+  color: var(--muted);
+}
+
+dl.facts dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+ul.plain,
+ol.plain {
+  margin: 0.25rem 0;
+  padding-left: 1.25rem;
+}
+
+ol.timeline {
+  margin: 0.25rem 0;
+  padding: 0;
+  list-style: none;
+  border-left: 3px solid var(--border);
+}
+
+ol.timeline li {
+  margin: 0;
+  padding: 0.35rem 0 0.35rem 0.9rem;
+}
+
+.mono,
+code,
+pre {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  font-size: 0.88rem;
+}
+
+pre {
+  margin: 0.5rem 0;
+  padding: 0.6rem;
+  max-height: 24rem;
+  overflow: auto;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 0.3rem;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 24rem), 1fr));
+  gap: 1rem;
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 0.5rem;
+}
+
+.feed {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.feed li {
+  padding: 0.4rem 0;
+  border-top: 1px solid var(--border);
+  overflow-wrap: anywhere;
+}
+
+.feed li:first-child {
+  border-top: none;
+}
+
+.graph {
+  display: block;
+  width: 100%;
+  height: auto;
+  max-height: 30rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 0.4rem;
+}
+
+.graph line {
+  stroke: var(--muted);
+  stroke-width: 1.5;
+}
+
+.graph circle {
+  stroke: var(--text);
+  stroke-width: 1.5;
+  fill: var(--badge-bg);
+}
+
+.graph .kind-identity circle {
+  fill: var(--low-bg);
+}
+
+.graph .kind-asset circle {
+  fill: var(--info-bg);
+}
+
+.graph .kind-alert circle {
+  fill: var(--high-bg);
+}
+
+.graph .kind-finding circle {
+  fill: var(--medium-bg);
+}
+
+.graph .kind-incident circle {
+  fill: var(--critical-bg);
+}
+
+.graph text {
+  fill: var(--text);
+  font-size: 12px;
+  text-anchor: middle;
+}
+
+.graph g.node {
+  cursor: pointer;
+}
+
+.graph g.node:focus-visible {
+  outline: none;
+}
+
+.graph g.node:focus-visible circle,
+.graph g.node:hover circle {
+  stroke: var(--focus);
+  stroke-width: 4;
+}
+
+.graph g.center circle {
+  stroke-width: 3;
+}
+
+details {
+  margin: 0.25rem 0;
+}
+
+summary {
+  cursor: pointer;
+}
+
+@media (max-width: 40rem) {
+  .session {
+    margin-left: 0;
+    width: 100%;
+  }
+
+  dl.facts {
+    grid-template-columns: 1fr;
+  }
+
+  dl.facts dt {
+    margin-top: 0.4rem;
+  }
+
+  th,
+  td {
+    padding: 0.4rem 0.5rem;
+  }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .tabs a,
+  button {
+    transition: background-color 0.1s ease-in-out;
+  }
+}

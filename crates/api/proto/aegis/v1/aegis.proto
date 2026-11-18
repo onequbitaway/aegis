@@ -1,0 +1,339 @@
+// The gRPC API of AEGIS.
+//
+// Each call needs a bearer token in the metadata key "authorization", in the form
+// "Bearer <token>". The access rules are the rules of the REST API.
+//
+// A field with the type string that holds an enumeration value uses the name that the
+// REST API uses in JSON, for example "disable_user" or "service_principal". A plugin
+// action type has the form "custom:<name>".
+
+syntax = "proto3";
+
+package aegis.v1;
+
+import "google/protobuf/timestamp.proto";
+
+// Reads incidents.
+service IncidentService {
+  // Lists incidents, newest first. Needs the permission view_incidents.
+  rpc ListIncidents(ListIncidentsRequest) returns (ListIncidentsResponse);
+  // Reads one incident. Needs the permission view_incidents.
+  rpc GetIncident(GetIncidentRequest) returns (Incident);
+}
+
+// Reads and decides approval requests.
+service ApprovalService {
+  // Lists the approval requests that have no decision, oldest first. Needs the
+  // permission view_incidents or approve_actions.
+  rpc ListPending(ListPendingRequest) returns (ListPendingResponse);
+  // Approves or rejects one gated action. Needs the permission approve_actions. The
+  // principal of the token is the principal of the decision.
+  rpc Decide(DecideRequest) returns (DecideResponse);
+}
+
+// How important an incident or a detection is.
+enum Severity {
+  // No value. In a request, this means no filter.
+  SEVERITY_UNSPECIFIED = 0;
+  // No security effect.
+  SEVERITY_INFORMATIONAL = 1;
+  // A small security effect.
+  SEVERITY_LOW = 2;
+  // A moderate security effect.
+  SEVERITY_MEDIUM = 3;
+  // A large security effect.
+  SEVERITY_HIGH = 4;
+  // The largest security effect.
+  SEVERITY_CRITICAL = 5;
+}
+
+// The state of an incident.
+enum IncidentStatus {
+  // No value. In a request, this means all states.
+  INCIDENT_STATUS_UNSPECIFIED = 0;
+  // The incident is new.
+  INCIDENT_STATUS_OPEN = 1;
+  // An agent analyzes the incident.
+  INCIDENT_STATUS_INVESTIGATING = 2;
+  // Containment actions stopped the activity.
+  INCIDENT_STATUS_CONTAINED = 3;
+  // The incident is complete.
+  INCIDENT_STATUS_RESOLVED = 4;
+  // The activity was not an attack.
+  INCIDENT_STATUS_FALSE_POSITIVE = 5;
+}
+
+// The state of an approval request.
+enum ApprovalStatus {
+  // No value.
+  APPROVAL_STATUS_UNSPECIFIED = 0;
+  // No person has decided.
+  APPROVAL_STATUS_PENDING = 1;
+  // A person approved the action.
+  APPROVAL_STATUS_APPROVED = 2;
+  // A person rejected the action.
+  APPROVAL_STATUS_REJECTED = 3;
+}
+
+// A reference to one entity in the environment of the operator.
+message EntityRef {
+  // The type of the entity, for example "user".
+  string kind = 1;
+  // The identifier that the source system gives to the entity.
+  string id = 2;
+  // The display name of the entity.
+  optional string name = 3;
+  // The tenant that owns the entity.
+  optional string tenant = 4;
+}
+
+// A MITRE ATT&CK technique.
+message AttackTechnique {
+  // The tactic, for example "privilege-escalation".
+  string tactic = 1;
+  // The technique identifier, for example "T1098.001".
+  string technique_id = 2;
+  // The name of the technique.
+  string name = 3;
+}
+
+// A link to an item of evidence.
+message EvidenceRef {
+  // The type of the evidence, for example "detection".
+  string kind = 1;
+  // The identifier of the evidence.
+  string id = 2;
+  // Why the evidence is relevant.
+  optional string note = 3;
+}
+
+// One entry in the timeline of an incident.
+message TimelineEntry {
+  // The time of the entry.
+  google.protobuf.Timestamp time = 1;
+  // The component or the person that made the entry.
+  string author = 2;
+  // What occurred.
+  string description = 3;
+  // The evidence for the entry.
+  repeated EvidenceRef evidence = 4;
+}
+
+// One finding of a detector.
+message Detection {
+  // The identifier of the detection.
+  string id = 1;
+  // The identifier of the rule or the detector.
+  string rule_id = 2;
+  // A short title.
+  string title = 3;
+  // What the detector found.
+  string description = 4;
+  // The severity of the detection.
+  Severity severity = 5;
+  // The conclusion of the detector: "malicious", "suspicious", or "benign".
+  string verdict = 6;
+  // The tier that made the detection: "deterministic" or "llm".
+  string tier = 7;
+  // The time of the last event that caused the detection.
+  google.protobuf.Timestamp time = 8;
+  // The ATT&CK techniques of the detection.
+  repeated AttackTechnique attack = 9;
+  // The identifiers of the events that caused the detection.
+  repeated string event_ids = 10;
+  // The entities that the detection involves.
+  repeated EntityRef entities = 11;
+  // The tenant in which the activity occurred.
+  optional string tenant = 12;
+  // More data from the detector, as one JSON object.
+  string attributes_json = 13;
+}
+
+// A set of related detections that describe one attack.
+message Incident {
+  // The identifier of the incident.
+  string id = 1;
+  // A short title.
+  string title = 2;
+  // An explanation of the incident.
+  string summary = 3;
+  // The severity of the incident.
+  Severity severity = 4;
+  // The state of the incident.
+  IncidentStatus status = 5;
+  // The time at which the correlator made the incident.
+  google.protobuf.Timestamp created_at = 6;
+  // The time of the last change.
+  google.protobuf.Timestamp updated_at = 7;
+  // The tenant in which the activity occurred.
+  optional string tenant = 8;
+  // The detections of the incident.
+  repeated Detection detections = 9;
+  // The entities that the incident involves.
+  repeated EntityRef entities = 10;
+  // The ATT&CK techniques of all detections.
+  repeated AttackTechnique attack = 11;
+  // The timeline of the incident, in time order.
+  repeated TimelineEntry timeline = 12;
+}
+
+// The request of ListIncidents.
+message ListIncidentsRequest {
+  // With a value, the answer has only incidents in this state.
+  IncidentStatus status = 1;
+  // The maximum number of incidents. The value 0 gives the default page size.
+  uint32 limit = 2;
+}
+
+// The answer of ListIncidents.
+message ListIncidentsResponse {
+  // The incidents, newest first.
+  repeated Incident incidents = 1;
+}
+
+// The request of GetIncident.
+message GetIncidentRequest {
+  // The identifier of the incident.
+  string id = 1;
+}
+
+// The identity that requests or approves an operation.
+message Principal {
+  // The identifier of the principal.
+  string id = 1;
+  // The type of the principal: "agent", "human", or "system".
+  string kind = 2;
+  // The roles of the principal.
+  repeated string roles = 3;
+}
+
+// The result of a policy evaluation.
+message PolicyDecision {
+  // What the policy permits: "allow", "require_approval", or "deny".
+  string effect = 1;
+  // The tier that the policy gives to the action: "auto" or "gated".
+  string tier = 2;
+  // The reasons that the policy gives.
+  repeated string reasons = 3;
+  // The policy rule that made the decision.
+  optional string policy = 4;
+  // The time of the evaluation.
+  google.protobuf.Timestamp evaluated_at = 5;
+}
+
+// A request to do one response action.
+message ActionRequest {
+  // The identifier of the request.
+  string id = 1;
+  // The type of the action, for example "disable_user".
+  string kind = 2;
+  // The entity that the action changes.
+  EntityRef target = 3;
+  // The parameters for the connector, as one JSON object.
+  string parameters_json = 4;
+  // The incident that the action responds to.
+  optional string incident_id = 5;
+  // The agent or the playbook that made the request.
+  string requested_by = 6;
+  // Why the action is necessary.
+  string reason = 7;
+  // The evidence for the action.
+  repeated EvidenceRef evidence = 8;
+  // With true, the connector changes nothing.
+  bool dry_run = 9;
+  // The time of the request.
+  google.protobuf.Timestamp requested_at = 10;
+}
+
+// A gated action that waits for the decision of a person.
+message ApprovalRequest {
+  // The identifier of the approval request.
+  string id = 1;
+  // The action that waits for approval.
+  ActionRequest action = 2;
+  // The identity that requested the action.
+  Principal requested_by = 3;
+  // The policy decision that made approval necessary.
+  PolicyDecision decision = 4;
+  // The state of the request.
+  ApprovalStatus status = 5;
+  // The time at which the request entered the queue.
+  google.protobuf.Timestamp requested_at = 6;
+  // The identifier of the principal that decided.
+  optional string decided_by = 7;
+  // The time of the decision.
+  google.protobuf.Timestamp decided_at = 8;
+  // A note from the principal that decided.
+  optional string note = 9;
+}
+
+// The request of ListPending.
+message ListPendingRequest {
+  // The maximum number of requests. The value 0 gives the default page size.
+  uint32 limit = 1;
+}
+
+// The answer of ListPending.
+message ListPendingResponse {
+  // The pending requests, oldest first.
+  repeated ApprovalRequest requests = 1;
+  // The number of all pending requests, before the limit applies.
+  uint32 total = 2;
+}
+
+// The request of Decide.
+message DecideRequest {
+  // The identifier of the approval request.
+  string id = 1;
+  // With true, the principal approves the action. With false, the principal rejects it.
+  bool approve = 2;
+  // A note from the principal.
+  optional string note = 3;
+}
+
+// The result of one action.
+message ActionOutcome {
+  // The identifier of the action request.
+  string action_id = 1;
+  // The result state: "succeeded", "failed", "simulated", or "skipped".
+  string status = 2;
+  // The name of the connector that did the action.
+  string connector = 3;
+  // What the connector did, or what it would do in a dry run.
+  string message = 4;
+  // More data from the connector, as one JSON document.
+  string details_json = 5;
+  // With true, the connector can undo the action.
+  bool reversible = 6;
+  // The time at which the connector completed the action.
+  google.protobuf.Timestamp completed_at = 7;
+}
+
+// An action that waits for one more approval.
+message PendingApproval {
+  // The identifier of the approval request.
+  string approval_id = 1;
+  // The policy decision.
+  PolicyDecision decision = 2;
+}
+
+// What the dispatcher did with an action.
+message ActionDisposition {
+  // The result.
+  oneof result {
+    // Policy permitted the action and a connector did it.
+    ActionOutcome executed = 1;
+    // Policy requires one more approval.
+    PendingApproval pending_approval = 2;
+    // Policy denied the action.
+    PolicyDecision denied = 3;
+  }
+}
+
+// The answer of Decide.
+message DecideResponse {
+  // The approval request after the decision.
+  ApprovalRequest request = 1;
+  // For an approval, what the dispatcher did with the action. Not set for a rejection.
+  ActionDisposition disposition = 2;
+}

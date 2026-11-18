@@ -1,0 +1,67 @@
+[package]
+name = "aegis-api"
+description = "The HTTP API, the embedded web console, and the ChatOps endpoints of AEGIS."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[features]
+default = []
+# Adds the gRPC services `aegis.v1.IncidentService` and `aegis.v1.ApprovalService`.
+# The build needs no `protoc` program: `build.rs` compiles the proto file with `protox`.
+grpc = [
+    "axum/http2",
+    "dep:prost",
+    "dep:prost-types",
+    "dep:protox",
+    "dep:tonic",
+    "dep:tonic-prost",
+    "dep:tonic-prost-build",
+]
+
+[dependencies]
+aegis-agents = { path = "../agents" }
+aegis-contracts.workspace = true
+aegis-core = { path = "../core" }
+aegis-policy = { path = "../policy" }
+aegis-respond = { path = "../respond" }
+async-trait.workspace = true
+axum = { version = "0.8.9", default-features = false, features = ["http1", "json", "tokio"] }
+base64 = "0.23.1"
+chrono.workspace = true
+futures.workspace = true
+hex.workspace = true
+hmac = "0.13.0"
+prost = { version = "0.14.5", optional = true }
+prost-types = { version = "0.14.5", optional = true }
+reqwest = { version = "0.13.5", default-features = false, features = ["rustls", "json"] }
+secrecy = "0.10.3"
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+subtle = "2.6.1"
+thiserror.workspace = true
+tokio = { workspace = true, features = ["net"] }
+tonic = { version = "0.14.9", default-features = false, features = ["codegen"], optional = true }
+tonic-prost = { version = "0.14.9", optional = true }
+tracing.workspace = true
+url = "2.5.8"
+uuid.workspace = true
+
+[build-dependencies]
+protox = { version = "0.10.0", optional = true }
+tonic-prost-build = { version = "0.14.9", optional = true }
+
+[dev-dependencies]
+aegis-testkit.workspace = true
+http-body-util = "0.1.5"
+# The gRPC test over a real connection needs an HTTP/2 client.
+reqwest = { version = "0.13.5", default-features = false, features = ["http2"] }
+tokio = { workspace = true, features = ["test-util"] }
+tower = { version = "0.5.3", default-features = false, features = ["util"] }
+wiremock = "0.6.5"
+
+[lints]
+workspace = true
