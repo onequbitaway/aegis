@@ -23,7 +23,7 @@ reqwest = { version = "0.13.5", default-features = false, features = ["rustls"] 
 toml = { version = "0.9.8", default-features = false, features = ["parse", "serde", "std"] }
 url = "2.5.8"
 wasmtime = { version = "=48.0.8", default-features = false, features = ["runtime", "cranelift", "component-model", "async", "std"] }
-wasmtime-wasi = { version = "=48.0.8", default-features = false }
+wasmtime-wasi = { version = "=50.0.1", default-features = false }
 
 [dev-dependencies]
 aegis-testkit.workspace = true
