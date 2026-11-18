@@ -1,0 +1,52 @@
+[package]
+name = "aegis-core"
+description = "Configuration, telemetry, the module set, and shutdown for AEGIS processes."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[features]
+default = []
+# Adds the OpenTelemetry OTLP trace exporter to the telemetry module.
+otlp = [
+    "dep:opentelemetry",
+    "dep:opentelemetry-otlp",
+    "dep:opentelemetry_sdk",
+    "dep:tracing-opentelemetry",
+]
+
+[dependencies]
+aegis-contracts.workspace = true
+serde.workspace = true
+tokio = { workspace = true, features = ["signal"] }
+tokio-util = "0.7.20"
+toml = { version = "0.9.8", default-features = false, features = ["parse", "serde", "std"] }
+tracing.workspace = true
+tracing-subscriber = { version = "0.3.23", default-features = false, features = ["fmt", "json", "std"] }
+
+opentelemetry = { version = "0.33.1", default-features = false, features = ["trace"], optional = true }
+opentelemetry-otlp = { version = "0.33.1", default-features = false, features = [
+    "http-proto",
+    "internal-logs",
+    "reqwest-blocking-client",
+    "reqwest-rustls",
+    "trace",
+], optional = true }
+opentelemetry_sdk = { version = "0.33.1", default-features = false, features = ["trace"], optional = true }
+tracing-opentelemetry = { version = "0.34.0", default-features = false, optional = true }
+
+[dev-dependencies]
+serde_json.workspace = true
+tempfile = "3.27.0"
+tokio = { workspace = true, features = ["test-util"] }
+wiremock = "0.6.5"
+
+# This test starts itself again as a child process. It has its own `main` function.
+[[test]]
+name = "child_process"
+harness = false
+
+[lints]
+workspace = true
