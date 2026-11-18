@@ -1,0 +1,72 @@
+# AEGIS example: the service on one host, with no model, no database, and no network.
+#
+# This configuration changes nothing in your environment:
+#   - Each response action is a dry run.
+#   - The storage and the message bus are in the memory of the process.
+#   - No model is configured. The agents use their deterministic paths.
+#   - The operator API listens only on the loopback address.
+#
+# A relative path starts at the directory of this file. The paths with `../..` go to the
+# files of the repository.
+
+[modules]
+# All modules, with the operator API.
+enabled = ["ingest", "detection", "monitor", "hunter", "analyst", "responder", "deception", "reporter", "api"]
+
+[telemetry]
+service_name = "aegis-offline-demo"
+log_format = "text"
+log_level = "info"
+
+[bus]
+kind = "memory"
+
+[storage]
+kind = "memory"
+
+[audit]
+kind = "file"
+path = "data/audit.jsonl"
+
+[policy]
+# The dry runs of `disable_service_principal` wait for the approval of a person.
+paths = ["policies/approval-rehearsal.rego"]
+
+[rbac.roles]
+analyst = ["view_incidents", "view_audit"]
+approver = ["view_incidents", "approve_actions"]
+
+[approval]
+four_eyes = true
+humans_only = true
+
+[detection]
+pack = "../../detections/aegis-identity"
+
+[agents]
+goal = "Keep the environment of the operator safe."
+dry_run = true
+monitor_events = "detected"
+
+[response]
+dry_run = true
+playbooks = "dry_run"
+playbook_dir = "../../playbooks"
+
+[ingest]
+checkpoint_dir = "data/checkpoints"
+
+# The recorded attack log of the repository: 648 normalized events.
+[[sources]]
+type = "file"
+name = "replay"
+path = "../../fixtures/artex_style_attack.jsonl"
+
+[api]
+bind = "127.0.0.1:8080"
+
+[[api.principals]]
+id = "alice@example.com"
+roles = ["analyst", "approver"]
+# The NAME of the environment variable that holds the token of this principal.
+token_env = "AEGIS_TOKEN_ALICE"

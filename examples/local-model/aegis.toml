@@ -1,0 +1,72 @@
+# AEGIS example: a local model behind an OpenAI-compatible server.
+#
+# The model server is on the same host. No data leaves the host.
+# This configuration changes nothing in your environment: each response action is a dry
+# run, and the storage and the message bus are in the memory of the process.
+#
+# A relative path starts at the directory of this file. The paths with `../..` go to the
+# files of the repository.
+
+[modules]
+enabled = ["ingest", "detection", "monitor", "hunter", "analyst", "responder", "deception", "reporter"]
+
+[telemetry]
+service_name = "aegis-local-model"
+log_format = "text"
+log_level = "warn"
+
+[bus]
+kind = "memory"
+
+[storage]
+kind = "memory"
+
+[audit]
+kind = "file"
+path = "data/audit.jsonl"
+
+[policy]
+paths = ["../../policies/default.rego"]
+
+[detection]
+pack = "../../detections/aegis-identity"
+
+[detection.triage]
+# Tier 2: the time limit for one answer of the model, in seconds.
+timeout_seconds = 60
+
+[agents]
+goal = "Keep the environment of the operator safe."
+dry_run = true
+
+[agents.limits]
+# The time limit for one agent task, in seconds. One task can have two model calls.
+task_timeout_seconds = 180
+
+[response]
+dry_run = true
+playbooks = "dry_run"
+playbook_dir = "../../playbooks"
+
+[ingest]
+checkpoint_dir = "data/checkpoints"
+
+# One provider: an OpenAI-compatible server on the loopback address.
+# The default address is the address of an Ollama server. A vLLM server and a llama.cpp
+# server use the same format. A local server needs no API key.
+[model.providers.local]
+kind = "openai_compatible"
+base_url = "http://localhost:11434/v1"
+# A small model, so that a first test is fast. Use a larger model for real work.
+chat_model = "qwen2.5:1.5b"
+# The time limit for one request to the model server.
+timeout = "60s"
+
+# All task kinds use the local model.
+[model.routes]
+default = [{ provider = "local" }]
+
+# Stop the model calls at 2,000,000 tokens in one hour.
+[model.budget]
+window = "1h"
+total_tokens = 2000000

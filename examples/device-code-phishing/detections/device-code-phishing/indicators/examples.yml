@@ -1,0 +1,12 @@
+# Example indicators that show the file format.
+#
+# The network is in a documentation range (RFC 5737). It refers to no real system.
+# Replace this file with indicators from your threat intelligence source.
+indicators:
+  - type: ip
+    value: 198.51.100.192/28
+    description: Example network of a relay that an attacker uses to redeem device codes.
+    severity: medium
+    tags:
+      - attack.command-and-control
+      - attack.t1090.003

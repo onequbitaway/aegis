@@ -1,0 +1,26 @@
+title: Device registered by a user
+id: 75f41c37-bc10-4ebe-a7ea-12144da07d2a
+status: test
+description: >-
+  A user registered a device in the directory. An attacker with stolen tokens registers a
+  device to get a long-lived token that stays valid after a password change.
+author: AEGIS project
+references:
+  - https://attack.mitre.org/techniques/T1098/005/
+detection:
+  selection:
+    # `device.register` is the form of the event vocabulary. The Entra ID source gives
+    # `register.device` for a directory audit record with the activity "Register device".
+    action:
+      - device.register
+      - register.device
+    actor.kind: user
+  filter_failed:
+    outcome: failure
+  condition: selection and not filter_failed
+falsepositives:
+  - A user who sets up a new computer or a new telephone.
+level: medium
+tags:
+  - attack.persistence
+  - attack.t1098.005

@@ -1,0 +1,5 @@
+name: device-code-phishing
+version: "0.1.0"
+description: >-
+  Detection rules and example indicators for device code phishing: a sign-in with the
+  device code flow, and a device registration that keeps the access.

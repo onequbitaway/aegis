@@ -1,0 +1,77 @@
+# AEGIS example: Microsoft Entra ID as the telemetry source, and Microsoft Graph for the
+# response actions.
+#
+# Each response action is a dry run. A dry run sends no request to Microsoft Graph that
+# changes the tenant. The source connector only reads the logs.
+#
+# Replace each placeholder identifier with the value of your tenant. Put no secret in
+# this file. The two secrets come from environment variables:
+#
+#   AEGIS_ENTRA_CLIENT_SECRET              the client secret of the read application
+#   AEGIS__RESPONSE__GRAPH__CLIENT_SECRET  the client secret of the response application
+#
+# A relative path starts at the directory of this file. The paths with `../..` go to the
+# files of the repository.
+
+[modules]
+enabled = ["ingest", "detection", "monitor", "hunter", "analyst", "responder", "deception", "reporter"]
+
+[telemetry]
+service_name = "aegis-entra"
+log_format = "text"
+log_level = "info"
+
+[bus]
+kind = "memory"
+
+[storage]
+kind = "memory"
+
+[audit]
+kind = "file"
+path = "data/audit.jsonl"
+
+[policy]
+paths = ["../../policies/default.rego"]
+
+[detection]
+pack = "../../detections/aegis-identity"
+
+[agents]
+goal = "Keep the identities of this tenant safe."
+# Keep `true` until you examined the dry runs.
+dry_run = true
+
+[response]
+# Keep `true` until you examined the dry runs. With `true`, no connector changes anything.
+dry_run = true
+playbooks = "dry_run"
+playbook_dir = "../../playbooks"
+
+# The response application: the Microsoft Graph connector for the identity actions.
+# Give this application registration only the permissions for the actions that you use.
+# The key `client_secret` is not in this file. Set it with the environment variable
+# AEGIS__RESPONSE__GRAPH__CLIENT_SECRET.
+[response.graph]
+name = "entra-graph"
+tenant_id = "00000000-0000-0000-0000-000000000000"
+client_id = "22222222-2222-2222-2222-222222222222"
+
+[ingest]
+# The connector continues at its last position after a restart.
+checkpoint_dir = "data/checkpoints"
+
+# The read application: the sign-in log and the directory audit log of the tenant.
+# This application registration needs only the permission AuditLog.Read.All.
+[[sources]]
+type = "entra"
+name = "entra-prod"
+tenant_id = "00000000-0000-0000-0000-000000000000"
+client_id = "11111111-1111-1111-1111-111111111111"
+# The NAME of the environment variable that holds the client secret.
+client_secret_env = "AEGIS_ENTRA_CLIENT_SECRET"
+poll_interval = "30s"
+sign_ins = true
+directory_audits = true
+# The log of service principal sign-ins is a beta endpoint of Microsoft Graph.
+service_principal_sign_ins = false

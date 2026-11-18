@@ -3,23 +3,27 @@
 [![CI](https://github.com/onequbitaway/aegis/actions/workflows/ci.yml/badge.svg)](https://github.com/onequbitaway/aegis/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-AEGIS is an open-source framework for autonomous cyber defense. An operator sets a defensive
-goal. A fleet of LLM agents then monitors the environment, finds attacks, and contains them at
-machine speed.
+AEGIS is an open-source framework for autonomous cyber defense, written in Rust. An
+operator sets a defensive goal. AEGIS then reads the telemetry of the environment, finds
+attacks, and proposes containment actions under the policy of the operator.
+
+AEGIS is defensive only. Use it only in an environment that you own or have
+authorization to defend.
 
 > [!IMPORTANT]
-> AEGIS is in the build phase. This repository contains the shared contracts and the test
-> tools only. The sections that follow describe the target design. You cannot use these
-> functions at this time.
+> AEGIS has no release. You build it from the source code. With the default settings,
+> each response action is a dry run, and AEGIS changes nothing in your environment. Read
+> [Project status](#project-status) before you use it.
 
 ## Contents
 
 - [Why AEGIS](#why-aegis)
-- [Design goals](#design-goals)
-- [Architecture](#architecture)
-- [Technology](#technology)
+- [What AEGIS does](#what-aegis-does)
+- [Quickstart](#quickstart)
 - [Project status](#project-status)
-- [Get started](#get-started)
+- [Architecture](#architecture)
+- [Crate map](#crate-map)
+- [Documentation](#documentation)
 - [Repository layout](#repository-layout)
 - [Scope and non-goals](#scope-and-non-goals)
 - [Contributing](#contributing)
@@ -29,215 +33,277 @@ machine speed.
 ## Why AEGIS
 
 Attackers use agent frameworks to automate attacks. One example is ARTEX, an open-source
-penetration test framework that threat actors use to run attack campaigns. These campaigns
-operate with almost no human input. A human security team cannot respond at that speed.
-Reports from [CERT-EU][cert-eu] and [Check Point Research][check-point] describe these
-campaigns.
+penetration test framework that threat actors use to run attack campaigns. These
+campaigns operate with almost no human input. A human security team cannot respond at
+that speed. Reports from [CERT-EU][cert-eu] and [Check Point Research][check-point]
+describe these campaigns.
 
-AEGIS gives defenders the same operation model. The operator sets a goal. The agents then work
-continuously to keep the environment safe.
+AEGIS gives defenders the same operation model. A deterministic fast path finds known
+attack patterns in milliseconds. Agents then analyze the incident and propose the
+containment. The operator owns the policy that decides each action.
 
-## Design goals
+## What AEGIS does
 
-1. **Model-agnostic.** All models work behind one interface: hosted models, gateways, and local
-   models. The operator can select a different model for each task.
-2. **Compatible with many tools.** Each telemetry input and each response action is a
-   connector. Each connector converts vendor data to one common schema.
-3. **Autonomous.** The operator sets the goals. The agents then run the observe, orient,
-   decide, and act (OODA) loop continuously.
-4. **Machine speed.** A deterministic fast path finds known threats in milliseconds without an
-   LLM. The LLM analyzes only new or ambiguous events.
-5. **Defensive only.** This project ships defensive modules only. Refer to
-   [Scope and non-goals](#scope-and-non-goals).
-6. **Modular.** Agents, connectors, detection packs, and policy are plugins. An operator can
-   run only the monitor function or the full OODA loop.
-7. **Air-gap capable.** The full system can operate offline with local models. The runtime is
-   one static binary.
+1. **Ingest.** Source connectors convert vendor telemetry to one normalized event.
+2. **Detect.** Tier 1 is deterministic: Sigma rules, indicator matches, and velocity
+   detectors, with no model. Tier 2 asks a model about the detections that tier 1 marks
+   as `suspicious`.
+3. **Correlate.** A correlator puts related detections in one incident and maps them to
+   [MITRE ATT&CK][attack].
+4. **Analyze.** A Supervisor and six agents share a Defensive Graph. They assess the
+   incident and propose response actions. Each agent has a deterministic path, so AEGIS
+   works with no model.
+5. **Respond.** Each action goes through one path. The path has the [Rego][rego]
+   policy, an approval by a person, an action connector, and the audit log.
+6. **Record.** A hash-chained audit log records each decision and its evidence.
 
-## Architecture
+## Quickstart
 
-### Data flow
+The demonstration replays a recorded attack by an automated agent on an identity tenant.
+It needs no model, no database, and no network. Each action is a dry run.
 
-```mermaid
-flowchart TD
-    sources["Telemetry sources<br/>SIEM, identity, cloud, EDR, network"]
-    ingest["Sensor and ingest<br/>source connectors, OCSF schema"]
-    bus[("Stream bus")]
-    tier1["Detection tier 1<br/>Sigma rules, IOC matches, velocity detectors"]
-    tier2["Detection tier 2<br/>LLM analysis"]
-    incident["Incident builder"]
-    agents["Agent runtime<br/>supervisor and six agents"]
-    dgraph[("Defensive Graph")]
-    models["Model abstraction<br/>provider adapters and router"]
-    policy{"Policy engine"}
-    actuation["Response and actuation<br/>action connectors, SOAR playbooks"]
-    audit[("Audit log")]
-    environment["Operator environment"]
+Prerequisites: Git, and [rustup][rustup].
 
-    sources --> ingest --> bus --> tier1
-    tier1 -- "known threat" --> incident
-    tier1 -- "ambiguous event" --> tier2
-    tier2 --> incident
-    tier2 <--> models
-    incident --> agents
-    agents <--> dgraph
-    agents <--> models
-    agents -- "proposed action" --> policy
-    policy -- "permitted action" --> actuation
-    actuation --> environment
-    policy --> audit
-    actuation --> audit
-```
-
-### Layers
-
-| Layer                     | Function                                                                                             |
-| ------------------------- | ---------------------------------------------------------------------------------------------------- |
-| Interface                 | Web console, REST and gRPC API, CLI, ChatOps, and reports.                                           |
-| Agent runtime             | A supervisor and six agents that share the Defensive Graph.                                          |
-| Model abstraction         | Provider adapters, a model router, one schema for tool calls, and embeddings.                        |
-| Detection and correlation | Sigma rules, IOC matches, velocity detectors, LLM analysis, and the incident builder.                |
-| Policy and audit          | A policy engine, action tiers, human approvals, and the audit log. This layer applies to all others. |
-| Sensor and ingest         | Source connectors that convert telemetry to the OCSF schema and put it on the stream bus.            |
-| Response and actuation    | Action connectors and a SOAR engine that do containment actions in the operator environment.         |
-
-### Agents
-
-Each agent runs a loop. All agents read from and write to the Defensive Graph. The graph holds
-assets, identities, alerts, findings, incidents, and their relations.
-
-| Agent      | Task                                                                                  |
-| ---------- | ------------------------------------------------------------------------------------- |
-| Supervisor | Divides the goal of the operator into tasks.                                          |
-| Monitor    | Monitors the live streams and keeps the situation picture current.                    |
-| Hunter     | Hunts for threats and examines the external exposure of the assets of the operator.   |
-| Analyst    | Triages alerts, adds context, finds false positives, and builds the case.             |
-| Responder  | Proposes containment actions and does them through the actuation layer, under policy. |
-| Deception  | Plants honeytokens and honeypots, and monitors them.                                  |
-| Reporter   | Writes incident reports, timelines, and abuse or takedown packages.                   |
-
-### Model abstraction
-
-- One `ModelProvider` interface supplies chat, tool calls, streams, and embeddings.
-- Each provider is one adapter. To add a model, write one adapter file.
-- A router selects a model for each task: a fast model for triage, a strong model for incident
-  analysis.
-- The router applies budget limits. If a model fails or refuses a defensive task, the router
-  uses a different model.
-
-### Detection
-
-Detection has two tiers:
-
-1. **Tier 1, deterministic.** [Sigma][sigma] rules and indicator of compromise (IOC) matches
-   classify known threats. This tier uses no LLM and has a latency of milliseconds.
-2. **Tier 2, LLM analysis.** The LLM analyzes only the events that tier 1 cannot classify.
-
-Velocity detectors find the burst patterns of an agent attack:
-
-- A sign-in burst, for example thousands of sign-ins in one minute.
-- An application that assigns a privileged role to itself.
-- A credential change on an application immediately after a grant.
-- Activity across tenants at a speed that is not possible for a person.
-
-AEGIS maps each detection to [MITRE ATT&CK][attack]. A correlator combines signals from many
-sources into one incident.
-
-### Response
-
-Action connectors are the output equivalent of source connectors. A SOAR engine runs YAML
-playbooks for known incidents. For a new incident, the LLM writes a draft response.
-
-The operator assigns each action to a tier:
-
-| Tier  | Actions                                                                   | Approval                                  |
-| ----- | ------------------------------------------------------------------------- | ----------------------------------------- |
-| Auto  | Safe and reversible: enrich, tag, notify, snapshot evidence.              | None.                                     |
-| Gated | Disruptive: disable a service principal, isolate a host, rotate a secret. | Policy check and optional human approval. |
-
-Each playbook has a dry-run mode.
-
-### Policy and audit
-
-- The policy engine evaluates [Rego][rego] policy in the AEGIS process. No sidecar is necessary.
-- The operator writes the policy. The policy sets which actions run automatically, which
-  actions must have approval, and which actions are not permitted.
-- The audit log records each agent decision, the evidence for it, and each action.
-- A hash chain makes changes to the audit log easy to find.
-- Each action has a link to its evidence.
-
-## Technology
-
-| Area          | Selection                                                                                |
-| ------------- | ---------------------------------------------------------------------------------------- |
-| Language      | Rust for the full runtime. No Python in the runtime.                                     |
-| Event schema  | [OCSF][ocsf].                                                                            |
-| Storage       | PostgreSQL with [Apache AGE][age] for the graph and [pgvector][pgvector] for embeddings. |
-| Stream bus    | [NATS JetStream][jetstream]. Kafka is an optional connector.                             |
-| Policy        | Rego, with the [regorus][regorus] engine.                                                |
-| Observability | [OpenTelemetry][otel].                                                                   |
-| Plugins       | Connectors are WASM components. Detections are Sigma YAML files.                         |
-| Deployment    | Containers and Kubernetes.                                                               |
-
-## Project status
-
-| Phase | Work                                                                                            | Status      |
-| ----- | ----------------------------------------------------------------------------------------------- | ----------- |
-| 0     | Repository scaffold: workspace, lint rules, CI, and project documents.                          | Complete    |
-| 1     | Contracts: the shared traits and types that all crates compile against.                         | Complete    |
-| 2     | Subsystems: model layer, ingest, detection, agent runtime, response, policy and audit, storage. | Not started |
-| 3     | Integration and end-to-end tests.                                                               | Not started |
-| 4     | Interface, packages, documentation, and examples.                                               | Not started |
-
-The first end-to-end milestone is a demonstration that runs offline with a local model and a
-mock source:
-
-1. AEGIS replays a recorded attack log.
-2. The detection tiers build the correct incidents.
-3. A containment playbook runs in dry-run mode.
-4. The audit log records each step.
-
-## Get started
-
-You can build and test the workspace at this time. The workspace has no functions that you can
-run.
-
-Prerequisites:
-
-- Git
-- [rustup][rustup]
-
-Steps:
-
-1. Clone the repository.
+1. Get the code, and install the pinned Rust toolchain.
 
    ```sh
    git clone https://github.com/onequbitaway/aegis.git
    cd aegis
-   ```
-
-2. Install the Rust toolchain that `rust-toolchain.toml` pins.
-
-   ```sh
    rustup toolchain install
    ```
 
-3. Build and test the workspace.
+2. Build the program. The first build compiles all dependencies and takes some minutes.
 
    ```sh
-   cargo build --workspace
-   cargo test --workspace
+   cargo build -p aegis-cli --locked
    ```
+
+3. Run the demonstration.
+
+   ```sh
+   ./target/debug/aegis demo
+   ```
+
+The command examines 648 events and prints the detections, the incident, the proposed
+actions, and the result of the audit check. This is a part of the output:
+
+```text
+AEGIS demonstration: replay of the recorded attack log: 648 events, dry run, no model
+
+Detections (8)
+  2026-11-03T09:10:00.450Z  high           malicious   T1110.003               Sign-in burst from one address  [aegis.velocity.sign_in_burst]
+  2026-11-03T09:10:31.000Z  high           malicious   T1078                   Successful sign-in after a sign-in burst  [aegis.velocity.sign_in_after_burst]
+  2026-11-03T09:10:37.000Z  high           malicious   T1528                   Consent to privileged application permissions  [5b0f3c2e-8a41-4d6f-9c57-2e1a7b90d314]
+  2026-11-03T09:10:40.000Z  high           malicious   T1098.001               New application credential immediately after a grant  [aegis.velocity.credential_after_grant]
+  2026-11-03T09:10:46.000Z  high           malicious   T1098.003               Privileged role assigned by a workload identity  [a4d7e1b9-6c35-4f02-8e7a-1b9c0d5f2a63]
+  2026-11-03T09:10:46.000Z  high           malicious   T1098.003               Workload identity gave itself a privileged role  [aegis.velocity.privileged_self_assignment]
+  2026-11-03T09:10:52.000Z  high           malicious   T1078.004               Principal acts from two places at an impossible speed  [aegis.velocity.impossible_speed]
+  2026-11-03T09:11:15.000Z  critical       malicious   T1552                   Honeytoken used  [0c9e4f7a-2b6d-4e18-a3f5-7d21c6b8e940]
+
+Incidents (1)
+  508657f7-d921-8cb3-add4-c2bd62528abd  critical       investigating   Multi-stage attack: 7 ATT&CK techniques in 8 detections
+
+Actions (23)
+  block_ip                    ip_address 203.0.113.50                         responder                                 executed: simulated (connector simulation)
+  disable_service_principal   service_principal sp-sync-helper                responder                                 executed: simulated (connector simulation)
+  revoke_credential           service_principal sp-sync-helper                responder                                 executed: simulated (connector simulation)
+  No action changed the environment.
+
+Audit log
+  Records: 155
+  Records checked: 155
+  Chain: valid
+```
+
+The sample shows 3 of the 23 action lines.
+
+Continue with [docs/quickstart.md](docs/quickstart.md). It explains the output, and it
+shows the service, the web console, an approval, and the audit log.
+
+## Project status
+
+AEGIS has no release and no version tag. The program has the version `0.1.0`. Each crate
+has automated tests. No external security audit was done.
+
+### What works today
+
+| Area | Function |
+| --- | --- |
+| Program | `aegis demo`, `init`, `run`, `replay`, `monitor`, `audit verify`, `audit show`, and `config check`. |
+| Sources | A JSON Lines event file. Microsoft Entra ID sign-in and directory audit logs. WebAssembly source plugins. |
+| Detection tier 1 | A subset of Sigma, indicators, four velocity detectors, and a honeytoken detector. |
+| Detection tier 2 | Model triage of `suspicious` detections, with strict validation of each answer. |
+| Correlation | Detections to incidents, with ATT&CK techniques and a severity. |
+| Agents | Supervisor, Monitor, Hunter, Analyst, Responder, Deception, and Reporter. Each works with no model. |
+| Models | Adapters for the OpenAI chat-completions format and for the Anthropic Messages API. A router with routes, fallback, and token budgets. |
+| Response | One dispatcher: Rego policy, approval queue, connector, audit. YAML playbooks with a dry-run mode. |
+| Action connectors | Microsoft Graph identity actions. Signed webhooks. WebAssembly action plugins. A honeytoken registry. |
+| Policy and audit | Rego policy in the process, role-based access control, approval rules, and a hash-chained audit log in a file or in PostgreSQL. |
+| Storage | In memory, or PostgreSQL with Apache AGE and pgvector. |
+| Bus | In the process, or NATS JetStream. |
+| Operator interface | A REST API, a web console, and Slack and Teams commands. |
+
+These functions were also run by hand for the documents:
+
+- All commands of the program.
+- The service with the web console and an approval.
+- The memory storage, the PostgreSQL storage, and the NATS bus.
+- The example plugins.
+- A local model on an Ollama server.
+
+These functions have only the automated tests, which use mock servers:
+
+- The Entra ID source and the Microsoft Graph connector against Microsoft Graph.
+- The Anthropic adapter.
+- The delivery of a webhook.
+- Slack and Teams.
+
+### What is not done
+
+- **No release.** No packages and no signed binaries. You build from source.
+- **Few connectors.** No connector for EDR products, firewalls, cloud platforms, or SIEM
+  products. Use the webhook connector or a plugin for them.
+- **No reload command.** The program reads the rule pack, the policy, and the playbooks
+  at the start. A change needs a restart.
+- **No access to reports.** The Reporter agent publishes each incident report on the
+  bus. No command and no API route shows it.
+- **No undo.** A connector can undo an action, but no command and no API route calls
+  that function.
+- **No TLS in the API server.** The server listens on a loopback address. For other
+  access, put a proxy with TLS before it.
+- **Some state is in memory.** The state of the velocity detectors and the honeytoken
+  registry do not continue after a restart.
+- **Parts that the program does not use.** The vector store and a function that makes a
+  response plan with a model exist in the libraries.
+- **Not in the default build.** gRPC is a Cargo feature that is off by default.
+- **Not built.** A Kafka bus, and export in the full Open Cybersecurity Schema Framework.
+- **No trace spans.** The trace exporter starts, but the components make no spans.
+
+Each document in [`docs`](docs/README.md) has a section "Limits" with more details.
+
+## Architecture
+
+One process holds all components. A configuration file selects the components that run.
+
+```mermaid
+flowchart TD
+    sources["Telemetry of the operator<br/>event files, Microsoft Entra ID, source plugins"]
+    ingest["Ingestion runners<br/>source connectors, normalized events, checkpoints"]
+    bus[("Message bus<br/>in-process or NATS JetStream")]
+    tier1["Detection tier 1<br/>Sigma rules, indicators, velocity detectors"]
+    tier2["Detection tier 2<br/>model triage of suspicious detections"]
+    correlator["Correlator<br/>detections to incidents"]
+    bridge["Bridge<br/>incident store, audit records, bus"]
+    agents["Agent runtime<br/>Supervisor and six agents"]
+    playbooks["Playbook engine"]
+    models["Model router<br/>provider adapters, routes, budgets"]
+    stores[("Stores<br/>incidents, Defensive Graph, approvals")]
+    dispatcher{"Dispatcher<br/>policy, approval, connector"}
+    connectors["Action connectors<br/>Microsoft Graph, webhook, action plugins"]
+    audit[("Audit log<br/>hash chain")]
+    api["Operator API<br/>REST, web console, ChatOps"]
+    environment["Environment of the operator"]
+
+    sources --> ingest
+    ingest --> bus
+    bus --> tier1
+    tier1 -- "malicious" --> correlator
+    tier1 -- "suspicious" --> tier2
+    tier2 --> correlator
+    tier2 --> models
+    correlator --> bridge
+    bridge --> stores
+    bridge --> bus
+    bridge --> audit
+    bus --> agents
+    bridge --> playbooks
+    agents --> stores
+    agents --> models
+    agents --> audit
+    agents -- "action request" --> dispatcher
+    playbooks -- "action request" --> dispatcher
+    dispatcher --> audit
+    dispatcher -- "permitted action" --> connectors
+    connectors --> environment
+    api --> stores
+    api -- "approval decision" --> dispatcher
+```
+
+The design rules:
+
+- **Deterministic first.** Tier 1 uses no model. A `malicious` tier 1 detection never
+  goes to a model, and a model cannot change it.
+- **One dispatch path.** No agent and no playbook calls a connector directly.
+- **The operator owns the policy.** AEGIS has no rules of its own about targets or
+  actions.
+- **Fail closed.** With no valid policy decision, AEGIS denies the action. An action
+  that the audit log cannot record does not run.
+- **Safe defaults.** Each action is a dry run until the operator permits changes.
+- **The model is not trusted.** The code validates each model answer. A model can only
+  select optional actions from a list that the code makes.
+- **Model-agnostic.** A hosted model, a gateway, or a local model works behind one
+  interface. AEGIS also works with no model.
+
+Refer to [docs/architecture.md](docs/architecture.md) for the data flow, the bus
+subjects, the trust boundaries, and the threat model of AEGIS.
+
+## Crate map
+
+All crates are in `crates/`. A crate talks to a different subsystem only through
+`aegis-contracts`.
+
+| Crate | Function |
+| --- | --- |
+| [`aegis-contracts`](crates/contracts/src) | The frozen traits and types that all crates use. |
+| [`aegis-core`](crates/core/README.md) | The configuration, the log, the module set, and the shutdown signal. |
+| [`aegis-ingest`](crates/ingest/README.md) | Source connectors, the ingestion runner, and checkpoints. |
+| [`aegis-bus`](crates/bus/README.md) | The message bus: NATS JetStream, or a bus in the process. |
+| [`aegis-detect`](crates/detect/README.md) | Sigma rules, indicators, velocity detectors, model triage, and the correlator. |
+| [`aegis-model`](crates/model/README.md) | Model provider adapters and the model router. |
+| [`aegis-agents`](crates/agents/README.md) | The agent runtime and the seven agents. |
+| [`aegis-respond`](crates/respond/README.md) | The dispatcher, the action connectors, the playbook engine, and honeytokens. |
+| [`aegis-policy`](crates/policy/README.md) | The Rego policy engine, access control, the approval service, and the file audit log. |
+| [`aegis-storage`](crates/storage/README.md) | PostgreSQL stores for the graph, the incidents, the audit log, and the approvals. |
+| [`aegis-memory`](crates/memory) | Stores in the memory of the process. |
+| [`aegis-plugin`](crates/plugin/README.md) | The sandbox for WebAssembly connector plugins. |
+| [`aegis-api`](crates/api/README.md) | The REST API, the web console, and ChatOps. |
+| [`aegis-app`](crates/app/README.md) | The composition root: builds all subsystems from one configuration. |
+| [`aegis-cli`](crates/cli/README.md) | The `aegis` program. |
+| [`aegis-testkit`](crates/testkit) | In-memory implementations of the contracts for tests. |
+
+## Documentation
+
+| Document | Contents |
+| --- | --- |
+| [docs/quickstart.md](docs/quickstart.md) | Build, the demonstration, the service, the console, an approval, and the audit log. |
+| [docs/demo.md](docs/demo.md) | The recorded attack, step by step. |
+| [docs/architecture.md](docs/architecture.md) | The components, the data flow, and the threat model. |
+| [docs/configuration.md](docs/configuration.md) | Each key of `aegis.toml`, environment overrides, and secrets. |
+| [docs/connectors.md](docs/connectors.md) | How to write a connector, native and as a plugin. |
+| [docs/detection-packs.md](docs/detection-packs.md) | How to write and test detection rules. |
+| [docs/playbooks.md](docs/playbooks.md) | How to write playbooks. |
+| [docs/policy.md](docs/policy.md) | How to write the response policy. |
+| [docs/operations.md](docs/operations.md) | How to operate the service, and troubleshooting. |
+| [docs/security.md](docs/security.md) | The hardening checklist and the tested security properties. |
+| [examples](examples/README.md) | Configuration sets that you can run. |
+
+For deployment in containers, refer to [`deploy/README.md`](deploy/README.md).
 
 ## Repository layout
 
 ```text
 .
 ├── .github/             CI workflow, Dependabot configuration, issue and PR templates
-├── crates/
-│   ├── contracts/       aegis-contracts: the frozen traits and types that all crates use
-│   └── testkit/         aegis-testkit: in-memory implementations of the contracts
-├── fixtures/            Recorded attack log for tests and the demonstration
+├── crates/              The Rust crates. Refer to the crate map.
+├── deploy/              Files for deployment in containers
+├── detections/          The detection pack that AEGIS ships
+├── docs/                The documentation
+├── examples/            Configuration sets that you can run
+├── fixtures/            The recorded attack log for tests and the demonstration
+├── playbooks/           The sample playbooks
+├── plugins/             Example WebAssembly connector plugins, and the authoring guide
+├── policies/            The default response policy and example policies
+├── wit/                 The WIT interface of connector plugins
 ├── AGENTS.md            Rules for coding agents
 ├── CHANGELOG.md         Record of notable changes
 ├── CODE_OF_CONDUCT.md   Contributor Covenant 3.0
@@ -252,8 +318,11 @@ Steps:
 ## Scope and non-goals
 
 - This project ships defensive modules only.
-- This project does not write or distribute offensive, exploitation, or counter-attack modules.
-- AEGIS does containment actions in the environment of the operator.
+- This project does not write or distribute offensive, exploitation, or counter-attack
+  modules. This rule includes payloads, stubs, and examples.
+- AEGIS only reads the telemetry of the operator. It does not scan or probe a system.
+- A response action changes only the environment of the operator, through the
+  administrative interface of the product.
 - The operator owns the policy that controls each action.
 
 Use AEGIS only in an environment that you own or have authorization to defend.
@@ -266,21 +335,14 @@ request. All participants must obey the [Code of Conduct](CODE_OF_CONDUCT.md).
 ## Security
 
 Do not open a public issue for a vulnerability. Read [SECURITY.md](SECURITY.md) for the
-procedure.
+procedure. Read [docs/security.md](docs/security.md) for the hardening checklist.
 
 ## License
 
 AEGIS is available under the [MIT License](LICENSE).
 
-[age]: https://age.apache.org/
 [attack]: https://attack.mitre.org/
 [cert-eu]: https://cert.europa.eu/blog/from-penetration-testing-to-cyber-threat-beware-of-artex
 [check-point]: https://research.checkpoint.com/2026/hacking-on-autopilot-inside-artex-cybercrime-campaigns/
-[jetstream]: https://docs.nats.io/nats-concepts/jetstream
-[ocsf]: https://schema.ocsf.io/
-[otel]: https://opentelemetry.io/
-[pgvector]: https://github.com/pgvector/pgvector
 [rego]: https://www.openpolicyagent.org/docs/policy-language
-[regorus]: https://github.com/microsoft/regorus
 [rustup]: https://rustup.rs
-[sigma]: https://sigmahq.io/

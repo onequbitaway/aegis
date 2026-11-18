@@ -1,0 +1,28 @@
+title: Sign-in with the device code flow
+id: 5fa29e3f-71e7-4c11-aca3-3341cf6f34f4
+status: test
+description: >-
+  A user completed a sign-in with the device code flow. An attacker starts this flow and
+  sends the code to a user. If the user enters the code, the attacker gets the tokens of
+  the user. Multi-factor authentication does not stop this attack.
+author: AEGIS project
+references:
+  - https://attack.mitre.org/techniques/T1566/002/
+logsource:
+  category: authentication
+detection:
+  selection:
+    action: sign_in
+    outcome: success
+    auth_protocol:
+      - device_code
+      - devicecode
+      - device code
+  condition: selection
+falsepositives:
+  - A device with no keyboard, for example a meeting room display.
+  - A command-line tool of an administrator.
+level: medium
+tags:
+  - attack.initial-access
+  - attack.t1566.002

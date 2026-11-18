@@ -1,0 +1,60 @@
+# Contain an account after device code phishing.
+#
+# The attacker has the tokens of the user, not the password. Thus the first step stops
+# the sign-in sessions of the user, which makes the stolen tokens invalid. The ticket
+# asks the identity team to remove the device that the attacker registered.
+#
+# All actions change only the tenant, the chat channel, and the ticket system of the
+# operator. Run the playbook in dry-run mode first.
+name: contain-device-code-phishing
+description: >-
+  Stop the sessions of a user whose tokens were stolen with the device code flow, tell
+  the security team, and open a ticket to remove the registered device.
+trigger:
+  min_severity: medium
+  techniques_all:
+    - T1566.002  # Spearphishing Link: the sign-in with the device code flow
+    - T1098.005  # Device Registration
+  entity_kinds:
+    - user
+steps:
+  - id: kill-user-sessions
+    action: kill_session
+    target:
+      each_entity: user
+    max_targets: 3
+    reason: >-
+      Incident {{incident.id}}: the tokens of the account {{target.name}} were stolen with
+      the device code flow. Stop its sign-in sessions.
+    continue_on_error: true
+
+  - id: notify-security-team
+    action: notify
+    target:
+      fixed:
+        kind: other
+        id: security-operations
+        name: Security operations channel
+    parameters:
+      title: "{{incident.title}}"
+      severity: "{{incident.severity}}"
+      techniques: "{{incident.techniques}}"
+    reason: >-
+      Incident {{incident.id}} ({{incident.severity}}): a device code sign-in and a device
+      registration for one account. Playbook: {{playbook.name}}.
+    continue_on_error: true
+
+  - id: open-ticket
+    action: open_ticket
+    target:
+      fixed:
+        kind: other
+        id: identity-team
+        name: Identity team queue
+    parameters:
+      title: "Device code phishing: {{incident.title}}"
+      priority: "{{incident.severity}}"
+    reason: >-
+      Incident {{incident.id}}: remove each device that the account registered after the
+      device code sign-in. Tell the owner of the account about the attack.
+    continue_on_error: true

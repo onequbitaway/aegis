@@ -1,0 +1,40 @@
+# AEGIS example: a detection pack and a playbook for device code phishing.
+#
+# This configuration changes nothing in your environment: each response action is a dry
+# run, and the storage and the message bus are in the memory of the process.
+#
+# A relative path starts at the directory of this file. The paths with `../..` go to the
+# files of the repository.
+
+[modules]
+enabled = ["ingest", "detection", "monitor", "hunter", "analyst", "responder", "deception", "reporter"]
+
+[telemetry]
+service_name = "aegis-device-code-phishing"
+log_level = "warn"
+
+[bus]
+kind = "memory"
+
+[storage]
+kind = "memory"
+
+[audit]
+kind = "file"
+path = "data/audit.jsonl"
+
+[policy]
+paths = ["../../policies/default.rego"]
+
+[detection]
+# The pack of this example. One process loads one pack.
+pack = "detections/device-code-phishing"
+
+[agents]
+dry_run = true
+
+[response]
+dry_run = true
+playbooks = "dry_run"
+# The playbook of this example.
+playbook_dir = "playbooks"
