@@ -45,12 +45,18 @@ impl Fixture {
 }
 
 /// The configuration for a new stream on `server`. `root` is the first subject token.
+/// The storage limit of each test stream.
+const TEST_STREAM_MAX_BYTES: u64 = 16 * 1024 * 1024;
+
 fn config_for(server: &NatsServer, root: &str) -> BusConfig {
     let mut config = BusConfig::default();
     config.nats.urls = vec![server.url().to_owned()];
     config.nats.connection_name = "aegis-bus-tests".to_owned();
     config.stream.name = format!("AEGIS_TEST_{root}");
     config.stream.subjects = vec![format!("{root}.>")];
+    // The server reserves `max_bytes` of storage for each stream. The default of 1 GiB for
+    // each test stream is more than a small test server has.
+    config.stream.max_bytes = TEST_STREAM_MAX_BYTES;
     config
 }
 

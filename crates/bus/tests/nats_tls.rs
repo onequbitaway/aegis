@@ -95,6 +95,8 @@ fn config_for(server: &NatsServer, root: &str) -> BusConfig {
     let mut config = BusConfig::default();
     config.nats.urls = vec![server.url().to_owned()];
     config.stream.name = format!("AEGIS_TEST_{root}");
+    // The server reserves `max_bytes` of storage for each stream. Keep the test stream small.
+    config.stream.max_bytes = 16 * 1024 * 1024;
     config.stream.subjects = vec![format!("{root}.>")];
     config
 }
