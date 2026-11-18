@@ -11,8 +11,10 @@ use std::fmt;
 use std::future::Future;
 use std::net::TcpListener;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Once};
+use std::thread::ThreadId;
 use std::time::{Duration, Instant};
 
 use aegis_contracts::action::{ActionConnector, ActionKind, ActionRequest, ActionStatus};
@@ -23,6 +25,7 @@ use aegis_plugin::{HostLimits, PluginHost, PluginKind, PluginManifest};
 use futures::StreamExt;
 use serde_json::json;
 use tracing::field::{Field, Visit};
+use tracing::level_filters::LevelFilter;
 use tracing::span;
 use wiremock::matchers::any;
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -571,12 +574,39 @@ impl Visit for LogLine {
     }
 }
 
-/// A `tracing` subscriber that keeps the log events of the plugin host.
-struct Capture(Arc<Mutex<Vec<LogLine>>>);
+/// The log events of the plugin host from all tests of this program, in the order of the
+/// writes. Each event has the thread that wrote it.
+static EVENTS: Mutex<Vec<(ThreadId, LogLine)>> = Mutex::new(Vec::new());
+
+/// `true` after [`Capture`] became the subscriber of all threads.
+static CAPTURE_IS_INSTALLED: AtomicBool = AtomicBool::new(false);
+
+/// The `tracing` subscriber of this test program. It keeps the log events of the plugin
+/// host in [`EVENTS`].
+///
+/// The program has one subscriber for all threads, and not one subscriber for each test.
+/// `tracing` decides one time if a log statement is on, and the decision applies to all
+/// threads. The thread that gets to the statement first asks its own subscriber. With one
+/// subscriber for each test, a test with no subscriber can be that thread. Then the
+/// statement stays off, and a test that reads the log gets no line.
+struct Capture;
 
 impl tracing::Subscriber for Capture {
     fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
         metadata.target().starts_with("aegis_plugin")
+    }
+
+    /// Keeps each log statement off until this subscriber is the subscriber of all
+    /// threads.
+    ///
+    /// Thus no thread can get to a log statement while it has no subscriber. `tracing`
+    /// would keep the decision of such a thread, which is "off".
+    fn max_level_hint(&self) -> Option<LevelFilter> {
+        if CAPTURE_IS_INSTALLED.load(Ordering::SeqCst) {
+            None
+        } else {
+            Some(LevelFilter::OFF)
+        }
     }
 
     fn new_span(&self, _: &span::Attributes<'_>) -> span::Id {
@@ -590,7 +620,10 @@ impl tracing::Subscriber for Capture {
     fn event(&self, event: &tracing::Event<'_>) {
         let mut line = LogLine::default();
         event.record(&mut line);
-        self.0.lock().unwrap().push(line);
+        EVENTS
+            .lock()
+            .unwrap()
+            .push((std::thread::current().id(), line));
     }
 
     fn enter(&self, _: &span::Id) {}
@@ -598,24 +631,99 @@ impl tracing::Subscriber for Capture {
     fn exit(&self, _: &span::Id) {}
 }
 
+/// The log lines of one test.
+///
+/// A line is a line of the test if it has the plugin name of the test, or if the thread
+/// of the test wrote it. The plugin name finds the lines of the test on each thread. The
+/// thread finds a line that the host wrote for the test with a wrong plugin name.
+struct HostLog {
+    /// The plugin name of the test. No other test of this program uses it.
+    plugin: &'static str,
+    /// The thread of the test.
+    thread: ThreadId,
+    /// The number of events in [`EVENTS`] when the test started. A line that an earlier
+    /// test wrote on the same thread is not a line of this test.
+    start: usize,
+}
+
+impl HostLog {
+    /// Starts to keep the log lines of the test that calls this function. The test must
+    /// give the name `plugin` to its plugin.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a different test of this program uses the plugin name.
+    fn of(plugin: &'static str) -> Self {
+        static INSTALL: Once = Once::new();
+        static PLUGINS: Mutex<Vec<&'static str>> = Mutex::new(Vec::new());
+        INSTALL.call_once(|| {
+            tracing::subscriber::set_global_default(Capture)
+                .expect("a different global `tracing` subscriber is in this test program");
+            CAPTURE_IS_INSTALLED.store(true, Ordering::SeqCst);
+            // `tracing` reads the new level limit of the subscriber only on this request.
+            tracing::callsite::rebuild_interest_cache();
+        });
+        let is_new = {
+            let mut plugins = PLUGINS.lock().unwrap();
+            let is_new = plugin != NAME && !plugins.contains(&plugin);
+            plugins.push(plugin);
+            is_new
+        };
+        assert!(
+            is_new,
+            "a different test uses the plugin name {plugin}: the tests would read the log lines of each other"
+        );
+        Self {
+            plugin,
+            thread: std::thread::current().id(),
+            start: EVENTS.lock().unwrap().len(),
+        }
+    }
+
+    /// Makes the manifest of the faulty source with the plugin name of this test.
+    fn source_manifest(&self, mode: &str) -> PluginManifest {
+        let mut manifest = source_manifest(mode);
+        self.plugin.clone_into(&mut manifest.name);
+        manifest
+    }
+
+    /// Returns the log lines of this test, in the order of the writes.
+    fn lines(&self) -> Vec<LogLine> {
+        EVENTS.lock().unwrap()[self.start..]
+            .iter()
+            .filter(|(thread, line)| line.plugin == self.plugin || *thread == self.thread)
+            .map(|(_, line)| line.clone())
+            .collect()
+    }
+
+    /// Returns the messages that the host wrote for the plugin of this test with `prefix`.
+    fn messages_with(&self, prefix: &str) -> Vec<String> {
+        self.lines()
+            .into_iter()
+            .filter(|line| line.plugin == self.plugin && line.message.starts_with(prefix))
+            .map(|line| line.message)
+            .collect()
+    }
+}
+
 #[tokio::test]
 async fn a_guest_that_floods_the_log_gets_only_its_budget_of_log_lines() {
-    let lines = Arc::new(Mutex::new(Vec::new()));
-    let _guard = tracing::subscriber::set_default(Capture(Arc::clone(&lines)));
+    let log = HostLog::of("faulty-log-flood");
     let host = PluginHost::new(HostLimits {
         max_log_messages_per_call: 7,
         ..HostLimits::default()
     })
     .unwrap();
-    let source = faulty_source(&host, "log-flood").await;
+    let manifest = log.source_manifest("log-flood");
+    let source = host.load_source(&manifest).await.unwrap();
 
     // The guest writes 10 000 messages in each call.
     poll_once(&source).await.unwrap();
 
     // The host writes the messages in the budget, and one line for the end of the budget.
-    let written = lines.lock().unwrap().clone();
+    let written = log.lines();
     assert_eq!(written.len(), 8);
-    assert!(written.iter().all(|line| line.plugin == NAME));
+    assert!(written.iter().all(|line| line.plugin == "faulty-log-flood"));
     let messages: Vec<&str> = written.iter().map(|line| line.message.as_str()).collect();
     assert_eq!(
         messages,
@@ -633,46 +741,35 @@ async fn a_guest_that_floods_the_log_gets_only_its_budget_of_log_lines() {
 
     // Each call has its own budget.
     poll_once(&source).await.unwrap();
-    assert_eq!(lines.lock().unwrap().len(), 16);
+    assert_eq!(log.lines().len(), 16);
 }
 
 #[tokio::test]
 async fn a_host_with_a_log_limit_of_zero_writes_no_line_for_a_guest() {
-    let lines = Arc::new(Mutex::new(Vec::new()));
-    let _guard = tracing::subscriber::set_default(Capture(Arc::clone(&lines)));
+    let log = HostLog::of("faulty-log-off");
     let host = PluginHost::new(HostLimits {
         max_log_messages_per_call: 0,
         ..HostLimits::default()
     })
     .unwrap();
-    let source = faulty_source(&host, "log-flood").await;
+    let manifest = log.source_manifest("log-flood");
+    let source = host.load_source(&manifest).await.unwrap();
 
     poll_once(&source).await.unwrap();
 
-    assert_eq!(lines.lock().unwrap().clone(), Vec::new());
-}
-
-/// Returns the messages that the host wrote for the plugin [`NAME`] with `prefix`.
-fn messages_with(lines: &Mutex<Vec<LogLine>>, prefix: &str) -> Vec<String> {
-    lines
-        .lock()
-        .unwrap()
-        .iter()
-        .filter(|line| line.plugin == NAME && line.message.starts_with(prefix))
-        .map(|line| line.message.clone())
-        .collect()
+    assert_eq!(log.lines(), Vec::new());
 }
 
 #[tokio::test]
 async fn a_guest_cannot_hold_more_host_resources_than_the_limit() {
-    let lines = Arc::new(Mutex::new(Vec::new()));
-    let _guard = tracing::subscriber::set_default(Capture(Arc::clone(&lines)));
+    let log = HostLog::of("faulty-hold-timers");
     let host = PluginHost::new(HostLimits {
         max_log_messages_per_call: 100_000,
         ..HostLimits::default()
     })
     .unwrap();
-    let source = faulty_source(&host, "hold-timers").await;
+    let manifest = log.source_manifest("hold-timers");
+    let source = host.load_source(&manifest).await.unwrap();
 
     // The guest makes timers without end. It writes one log message for each timer.
     let error = poll_once(&source).await.unwrap_err();
@@ -680,13 +777,13 @@ async fn a_guest_cannot_hold_more_host_resources_than_the_limit() {
     assert_eq!(
         other_parts(&error),
         Some((
-            "plugin faulty: `poll` failed in the sandbox",
+            "plugin faulty-hold-timers: `poll` failed in the sandbox",
             "resource table has no free keys".to_owned()
         )),
         "{error:?}"
     );
     // The limit is 1024 host resources. One timer uses two: the timer and its pollable.
-    let held = messages_with(&lines, "The plugin holds ");
+    let held = log.messages_with("The plugin holds ");
     assert_eq!(held.len(), 512);
     assert_eq!(
         held.last().map(String::as_str),
@@ -735,8 +832,7 @@ const HTTP_FAILURE: &str = "The host did not complete an HTTP request of the plu
 
 #[tokio::test]
 async fn a_guest_that_floods_refused_http_requests_gets_only_its_budget_of_checks() {
-    let lines = Arc::new(Mutex::new(Vec::new()));
-    let _guard = tracing::subscriber::set_default(Capture(Arc::clone(&lines)));
+    let log = HostLog::of("faulty-http-refused");
     let server = MockServer::start().await;
     let host = PluginHost::new(HostLimits {
         max_http_requests_per_call: 3,
@@ -744,7 +840,7 @@ async fn a_guest_that_floods_refused_http_requests_gets_only_its_budget_of_check
     })
     .unwrap();
     // The manifest has no permitted hosts. The host refuses each request.
-    let mut manifest = source_manifest("http-flood");
+    let mut manifest = log.source_manifest("http-flood");
     manifest
         .config
         .insert("flood_url".to_owned(), format!("{}/flood", server.uri()));
@@ -766,7 +862,7 @@ async fn a_guest_that_floods_refused_http_requests_gets_only_its_budget_of_check
         server.address()
     );
     assert_eq!(
-        messages_with(&lines, HTTP_FAILURE),
+        log.messages_with(HTTP_FAILURE),
         [
             refused.clone(),
             refused.clone(),
@@ -778,14 +874,13 @@ async fn a_guest_that_floods_refused_http_requests_gets_only_its_budget_of_check
 
 #[tokio::test]
 async fn a_long_host_name_in_a_refused_request_does_not_make_a_long_log_line() {
-    let lines = Arc::new(Mutex::new(Vec::new()));
-    let _guard = tracing::subscriber::set_default(Capture(Arc::clone(&lines)));
+    let log = HostLog::of("faulty-long-host");
     let host = PluginHost::new(HostLimits {
         max_http_requests_per_call: 1,
         ..HostLimits::default()
     })
     .unwrap();
-    let mut manifest = source_manifest("http-flood");
+    let mut manifest = log.source_manifest("http-flood");
     let long_name = "a".repeat(100_000);
     manifest.config.insert(
         "flood_url".to_owned(),
@@ -799,7 +894,7 @@ async fn a_long_host_name_in_a_refused_request_does_not_make_a_long_log_line() {
     let refusal = format!("the destination {long_name}");
     let kept: String = refusal.chars().take(1024).collect();
     assert_eq!(
-        messages_with(&lines, HTTP_FAILURE),
+        log.messages_with(HTTP_FAILURE),
         [
             format!("{HTTP_FAILURE}{kept}...."),
             format!("{HTTP_FAILURE}the plugin made more than 1 HTTP requests in one call."),
