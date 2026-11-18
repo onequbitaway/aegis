@@ -60,6 +60,12 @@ pub mod action {
     pub const PROCESS_START: &str = "process.start";
     /// A read or a use of a honeytoken or a canary.
     pub const HONEYTOKEN_TRIP: &str = "honeytoken.trip";
+    /// A client connected to a decoy service or sent a request to it.
+    pub const DECOY_CONTACT: &str = "decoy.contact";
+    /// A client followed a hidden instruction that only an automated agent reads.
+    pub const DECOY_CANARY_HIT: &str = "decoy.canary_hit";
+    /// A request to a web or API endpoint of the operator.
+    pub const HTTP_REQUEST: &str = "http.request";
 }
 
 /// Normalized keys for [`Event::attributes`].
@@ -112,6 +118,24 @@ pub mod attr {
     pub const DESTINATION_DOMAIN: &str = "destination_domain";
     /// The identifier of a honeytoken.
     pub const HONEYTOKEN_ID: &str = "honeytoken_id";
+    /// The identifier of a decoy service.
+    pub const DECOY_ID: &str = "decoy_id";
+    /// The type of a decoy service, for example `tarpit`, `maze`, or `model_api`.
+    pub const DECOY_KIND: &str = "decoy_kind";
+    /// The identifier of a canary instruction.
+    pub const CANARY_ID: &str = "canary_id";
+    /// A stable fingerprint of a client, made from its headers and its behavior.
+    pub const CLIENT_FINGERPRINT: &str = "client_fingerprint";
+    /// The method of an HTTP request.
+    pub const HTTP_METHOD: &str = "http_method";
+    /// The path of an HTTP request, without the query.
+    pub const HTTP_PATH: &str = "http_path";
+    /// The status code of an HTTP response, as a number.
+    pub const HTTP_STATUS: &str = "http_status";
+    /// The time that a decoy held a client, in milliseconds.
+    pub const HELD_MILLISECONDS: &str = "held_milliseconds";
+    /// The number of bytes that a client sent.
+    pub const BYTES_RECEIVED: &str = "bytes_received";
 }
 
 /// The class of activity that an event describes. The names follow OCSF classes.
