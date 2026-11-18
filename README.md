@@ -8,8 +8,9 @@ goal. A fleet of LLM agents then monitors the environment, finds attacks, and co
 machine speed.
 
 > [!IMPORTANT]
-> AEGIS is in the design phase. This repository contains the project scaffold only. The
-> sections that follow describe the target design. You cannot use these functions at this time.
+> AEGIS is in the build phase. This repository contains the shared contracts and the test
+> tools only. The sections that follow describe the target design. You cannot use these
+> functions at this time.
 
 ## Contents
 
@@ -183,7 +184,7 @@ Each playbook has a dry-run mode.
 | Phase | Work                                                                                            | Status      |
 | ----- | ----------------------------------------------------------------------------------------------- | ----------- |
 | 0     | Repository scaffold: workspace, lint rules, CI, and project documents.                          | Complete    |
-| 1     | Contracts: the shared traits and types that all crates compile against.                         | Not started |
+| 1     | Contracts: the shared traits and types that all crates compile against.                         | Complete    |
 | 2     | Subsystems: model layer, ingest, detection, agent runtime, response, policy and audit, storage. | Not started |
 | 3     | Integration and end-to-end tests.                                                               | Not started |
 | 4     | Interface, packages, documentation, and examples.                                               | Not started |
@@ -234,7 +235,9 @@ Steps:
 .
 ├── .github/             CI workflow, Dependabot configuration, issue and PR templates
 ├── crates/
-│   └── contracts/       aegis-contracts: shared traits and types (empty at this time)
+│   ├── contracts/       aegis-contracts: the frozen traits and types that all crates use
+│   └── testkit/         aegis-testkit: in-memory implementations of the contracts
+├── fixtures/            Recorded attack log for tests and the demonstration
 ├── AGENTS.md            Rules for coding agents
 ├── CHANGELOG.md         Record of notable changes
 ├── CODE_OF_CONDUCT.md   Contributor Covenant 3.0

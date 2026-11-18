@@ -46,6 +46,9 @@ RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked
 
 - Write all runtime code in Rust.
 - Put each new crate in `crates/`. Add `[lints] workspace = true` to its `Cargo.toml`.
+- `crates/contracts` holds the frozen contracts between subsystems. Open an issue before you
+  change it.
+- A crate talks to a different subsystem only through `aegis-contracts`.
 - Library code must not panic. Do not use `unwrap`, `expect`, `panic!`, `todo!`, or
   `unimplemented!` outside tests. The workspace lints reject them.
 - Do not write `unsafe` code. The workspace lints forbid it.
