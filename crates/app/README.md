@@ -468,9 +468,9 @@ tokens through `OperatorApi::with_env`. They do not change the environment of th
 | `tests/docker.rs` | A replay and a service run with PostgreSQL storage, the PostgreSQL audit log, and a NATS bus. The operator API then reads the same database and the same bus. |
 
 The feature `docker-tests` needs Docker. `tests/docker.rs` builds the image
-`aegis-int-postgres:test` from `deploy/docker/postgres`, and starts one PostgreSQL
+`aegis-test-postgres:test` from `deploy/docker/postgres`, and starts one PostgreSQL
 container and one NATS container on free ports of the local host. Each container name
-starts with `aegis-int-`. The test removes the containers.
+starts with `aegis-test-app-`. The test removes the containers.
 
 ## Limits
 

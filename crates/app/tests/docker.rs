@@ -4,7 +4,7 @@
 //!
 //! The test starts two containers on free ports of the local host: PostgreSQL from
 //! `deploy/docker/postgres/Dockerfile`, and NATS with JetStream. Each name starts with
-//! `aegis-int-`. The test removes the containers when it ends. A watchdog in each
+//! `aegis-test-app-`. The test removes the containers when it ends. A watchdog in each
 //! container also stops it when the test process goes away early.
 #![cfg(feature = "docker-tests")]
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
@@ -33,7 +33,7 @@ use futures::StreamExt;
 
 use support::{Starter, replace_once};
 
-const POSTGRES_IMAGE: &str = "aegis-int-postgres:test";
+const POSTGRES_IMAGE: &str = "aegis-test-postgres:test";
 const NATS_IMAGE: &str = "nats:2.12-alpine";
 const LABEL: &str = "aegis.test=int-app";
 const START_LIMIT: Duration = Duration::from_secs(180);
@@ -67,7 +67,7 @@ fn unique(kind: &str) -> String {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .subsec_nanos();
-    format!("aegis-int-{kind}-{}-{nanoseconds:08x}", std::process::id())
+    format!("aegis-test-app-{kind}-{}-{nanoseconds:08x}", std::process::id())
 }
 
 /// A container that the test started. The container goes away with this value.
