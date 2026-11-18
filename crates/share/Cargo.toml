@@ -1,0 +1,28 @@
+[package]
+name = "aegis-share"
+description = "Abuse reports and indicator exports that an AEGIS operator can send to other defenders. The crate makes documents only."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+aegis-contracts.workspace = true
+aho-corasick = "1.1.5"
+chrono.workspace = true
+hex.workspace = true
+ipnet = { version = "2.12.2", features = ["serde"] }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+uuid = { workspace = true, features = ["v5"] }
+
+[dev-dependencies]
+aegis-detect.workspace = true
+aegis-testkit.workspace = true
+tokio.workspace = true
+
+[lints]
+workspace = true
