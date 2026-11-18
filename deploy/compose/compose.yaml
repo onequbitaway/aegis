@@ -1,0 +1,199 @@
+# AEGIS with PostgreSQL and NATS JetStream on one Docker host.
+#
+# Before the first start, copy `.env.example` to `.env` and set each secret. Then:
+#
+#   docker compose up --build --detach --wait
+#
+# The profile `local-model` adds a local model server. To use it, give the overlay file:
+#
+#   docker compose --env-file .env --env-file local-model.env up --build --detach --wait
+#
+# Refer to ../README.md for the full instructions.
+
+name: aegis
+
+x-logging: &logging
+  # The `local` driver keeps a small number of compressed log files for each container.
+  driver: local
+  options:
+    max-size: 10m
+    max-file: "5"
+
+services:
+  aegis:
+    image: ${AEGIS_IMAGE:-aegis:local}
+    build:
+      context: ../..
+      dockerfile: deploy/docker/aegis/Dockerfile
+      args:
+        AEGIS_FEATURES: full
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+      # The model server is in the stack only with the profile `local-model`.
+      ollama:
+        condition: service_healthy
+        required: false
+    environment:
+      # The secrets. The quotation marks in the value of the NATS token make the value a
+      # TOML string, also if the token has only digits.
+      - AEGIS__STORAGE__URL=postgres://aegis:${AEGIS_POSTGRES_PASSWORD:?Set AEGIS_POSTGRES_PASSWORD in the file .env. Refer to .env.example.}@postgres:5432/aegis?sslmode=disable
+      - AEGIS__BUS__NATS__AUTH__TOKEN="${AEGIS_NATS_TOKEN:?Set AEGIS_NATS_TOKEN in the file .env. Refer to .env.example.}"
+      - AEGIS_TOKEN_OPERATOR=${AEGIS_TOKEN_OPERATOR:?Set AEGIS_TOKEN_OPERATOR in the file .env. Refer to .env.example.}
+      # The model overlay. A name with no value gives the variable to the container only
+      # if an environment file sets it. `local-model.env` sets these variables.
+      - AEGIS__MODEL__PROVIDERS__LOCAL__KIND
+      - AEGIS__MODEL__PROVIDERS__LOCAL__BASE_URL
+      - AEGIS__MODEL__PROVIDERS__LOCAL__CHAT_MODEL
+      - AEGIS__MODEL__ROUTES__DEFAULT
+    volumes:
+      # The configuration, the policy, the detection pack, the playbooks, and the
+      # recorded attack log. All are read-only files of the repository.
+      - ./aegis.toml:/etc/aegis/aegis.toml:ro
+      - ../../policies:/etc/aegis/policies:ro
+      - ../../detections:/etc/aegis/detections:ro
+      - ../../playbooks:/etc/aegis/playbooks:ro
+      - ../../fixtures/artex_style_attack.jsonl:/etc/aegis/events/artex_style_attack.jsonl:ro
+      # The audit log and the checkpoints of the sources.
+      - aegis-data:/var/lib/aegis
+    ports:
+      # The operator API, only on the loopback address of the host. The API has no TLS.
+      - "127.0.0.1:${AEGIS_API_PORT:-8080}:8080"
+    networks:
+      - backplane
+      - edge
+    user: "65532:65532"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 30s
+    healthcheck:
+      # The image has no shell and no HTTP client. This check reads the audit log file and
+      # verifies its hash chain. The file exists only after AEGIS connected to PostgreSQL
+      # and to NATS and started the service.
+      test: ["CMD", "/aegis", "audit", "verify", "--path", "/var/lib/aegis/audit.jsonl"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+      start_interval: 2s
+    logging: *logging
+
+  postgres:
+    image: ${AEGIS_POSTGRES_IMAGE:-aegis-postgres:local}
+    build:
+      context: ../docker/postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: aegis
+      POSTGRES_DB: aegis
+      POSTGRES_PASSWORD: ${AEGIS_POSTGRES_PASSWORD:?Set AEGIS_POSTGRES_PASSWORD in the file .env. Refer to .env.example.}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks:
+      - backplane
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /var/run/postgresql
+    # The entrypoint starts as root, gives the data directory to the user `postgres`, and
+    # then changes to that user. It needs only these capabilities.
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+      - SETGID
+      - SETUID
+    security_opt:
+      - no-new-privileges:true
+    shm_size: 256m
+    stop_grace_period: 60s
+    healthcheck:
+      # The check uses TCP. Thus it fails while the first start prepares the database.
+      test: ["CMD", "pg_isready", "--host=127.0.0.1", "--username=aegis", "--dbname=aegis"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+      start_interval: 2s
+    logging: *logging
+
+  nats:
+    image: nats:2.12.15-alpine@sha256:b270f5e2428354c0335612694d7dd2fb588148e567a5757fdff325ef9c9332e6
+    restart: unless-stopped
+    command:
+      - nats-server
+      - --config
+      - /etc/nats/aegis.conf
+      - --auth
+      - ${AEGIS_NATS_TOKEN:?Set AEGIS_NATS_TOKEN in the file .env. Refer to .env.example.}
+    volumes:
+      - ./nats.conf:/etc/nats/aegis.conf:ro
+      - nats-data:/data
+    networks:
+      - backplane
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 30s
+    healthcheck:
+      # The monitoring port listens only on the loopback address of the container.
+      test: ["CMD", "wget", "--quiet", "--spider", "http://127.0.0.1:8222/healthz?js-enabled-only=true"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+      start_interval: 2s
+    logging: *logging
+
+  # A local model server with an OpenAI-compatible API. This is the air-gapped profile:
+  # the server is only on the network that has no route to the internet. Load a model
+  # into the volume `ollama-models` before the start. Refer to ../README.md.
+  ollama:
+    profiles:
+      - local-model
+    image: ollama/ollama:0.40.15@sha256:0e59999e0e8f9fd4e704bd788a89b7e4cad399367fb1365f8c102ac662288761
+    restart: unless-stopped
+    environment:
+      OLLAMA_HOST: 0.0.0.0:11434
+    volumes:
+      - ollama-models:/root/.ollama
+    networks:
+      - backplane
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      # `ollama list` asks the server of this container for its models.
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+      start_interval: 2s
+    logging: *logging
+
+networks:
+  # The network of the services. It has no route to the internet. PostgreSQL, NATS, and
+  # the model server are only on this network, and they have no port on the host.
+  backplane:
+    internal: true
+  # The network for the published port of the operator API and for the connections of
+  # AEGIS to the systems that it protects. Only the service `aegis` uses it.
+  edge:
+
+volumes:
+  aegis-data:
+  postgres-data:
+  nats-data:
+  ollama-models:

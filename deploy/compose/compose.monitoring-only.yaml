@@ -1,0 +1,62 @@
+# AEGIS monitoring only: one container, with no database, no NATS server, no model, and
+# no HTTP server.
+#
+#   docker compose --file compose.monitoring-only.yaml up --build
+#
+# The service reads the recorded attack log of the repository, prints each detection and
+# each incident, and then stops. It takes no action. This variant needs no file `.env`.
+#
+# To monitor your own sources without a stop, put your sources in
+# `aegis.monitoring-only.toml` and use the second `command` below. Refer to ../README.md.
+
+name: aegis-monitoring-only
+
+services:
+  aegis:
+    image: ${AEGIS_MONITORING_IMAGE:-aegis:monitoring-only}
+    build:
+      context: ../..
+      dockerfile: deploy/docker/aegis/Dockerfile
+      args:
+        AEGIS_FEATURES: monitoring-only
+    # One session on an event file. The session uses the rule pack and the detection
+    # settings of the configuration, the bus in the memory of the process, and an audit
+    # log in /tmp.
+    command:
+      - monitor
+      - --config
+      - /etc/aegis/aegis.toml
+      - --events
+      - /etc/aegis/events/artex_style_attack.jsonl
+    # A service that runs until you stop it. It reads the [[sources]] of the
+    # configuration. Its result is in the audit log in the volume `aegis-data`.
+    # command: ["run", "--config", "/etc/aegis/aegis.toml"]
+    # restart: unless-stopped
+    restart: "no"
+    volumes:
+      - ./aegis.monitoring-only.toml:/etc/aegis/aegis.toml:ro
+      - ../../policies:/etc/aegis/policies:ro
+      - ../../detections:/etc/aegis/detections:ro
+      - ../../fixtures/artex_style_attack.jsonl:/etc/aegis/events/artex_style_attack.jsonl:ro
+      - aegis-data:/var/lib/aegis
+    tmpfs:
+      # `aegis monitor` keeps the audit log of its session in a temporary directory.
+      - /tmp:size=64m,mode=1777,noexec,nosuid,nodev
+    # The session reads a file and opens no listener, so the container has no network.
+    # Remove this line if a source of your configuration reads from the network.
+    network_mode: none
+    user: "65532:65532"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 30s
+    logging:
+      driver: local
+      options:
+        max-size: 10m
+        max-file: "5"
+
+volumes:
+  aegis-data:

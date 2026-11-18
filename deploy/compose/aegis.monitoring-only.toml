@@ -1,0 +1,44 @@
+# The AEGIS configuration of the monitoring-only Compose variant.
+#
+# The process uses no database, no NATS server, no model, and no HTTP server. It runs
+# only ingestion, detection, and the Monitor agent. No component of these modules can
+# take an action.
+#
+# The container has this file at /etc/aegis/aegis.toml. A relative path starts at the
+# directory of this file.
+
+[modules]
+enabled = ["ingest", "detection", "monitor"]
+
+[telemetry]
+service_name = "aegis"
+log_format = "text"
+log_level = "warn"
+
+[bus]
+# The bus is in the memory of the process.
+kind = "memory"
+
+[storage]
+# The data goes away when the process stops.
+kind = "memory"
+
+[audit]
+kind = "file"
+path = "/var/lib/aegis/audit.jsonl"
+
+[policy]
+paths = ["policies/default.rego"]
+
+[detection]
+pack = "detections/aegis-identity"
+
+[ingest]
+checkpoint_dir = "/var/lib/aegis/checkpoints"
+
+# `aegis monitor` does not use this source: it reads the file of its `--events` option.
+# `aegis run` reads this source. Replace it with the sources of your environment.
+[[sources]]
+type = "file"
+name = "replay"
+path = "events/artex_style_attack.jsonl"

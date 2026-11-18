@@ -1,0 +1,96 @@
+# The AEGIS configuration of the Docker Compose stack in this directory.
+#
+# This configuration changes nothing in your environment:
+#   - Each response action is a dry run.
+#   - No model is configured. The agents use their deterministic paths.
+#
+# This file has no secret. `compose.yaml` gives each secret as an environment variable:
+#   AEGIS__STORAGE__URL             The database URL, with the password. Sets `storage.url`.
+#   AEGIS__BUS__NATS__AUTH__TOKEN   The token for the NATS server. Sets `bus.nats.auth.token`.
+#   AEGIS_TOKEN_OPERATOR            The API token of the principal in the [api] section.
+#
+# The container has this file at /etc/aegis/aegis.toml. A relative path starts at the
+# directory of this file.
+
+[modules]
+# The subsystems that the process runs. Remove "responder" to only monitor.
+enabled = ["ingest", "detection", "monitor", "hunter", "analyst", "responder", "deception", "reporter", "api"]
+
+[telemetry]
+service_name = "aegis"
+log_format = "text"
+log_level = "info"
+
+[bus]
+kind = "nats"
+
+[bus.nats]
+urls = ["nats://nats:4222"]
+
+[bus.nats.auth]
+method = "token"
+
+[storage]
+kind = "postgres"
+
+[audit]
+# The hash-chained audit log. One process writes one file. The file is in the volume
+# `aegis-data`.
+kind = "file"
+path = "/var/lib/aegis/audit.jsonl"
+
+[policy]
+# You own this policy. Change it to fit your environment.
+paths = ["policies/default.rego"]
+
+# The permissions of each role. A principal of the operator API gets its permissions
+# from the roles that it names. No permission includes a different permission.
+[rbac.roles]
+analyst = ["view_incidents", "view_audit"]
+approver = ["view_incidents", "approve_actions"]
+admin = ["view_incidents", "view_audit", "manage_policy", "manage_connectors", "run_playbooks", "administer"]
+
+[approval]
+# The requester of an action cannot approve it, and only a person can decide.
+four_eyes = true
+humans_only = true
+
+[detection]
+pack = "detections/aegis-identity"
+
+[agents]
+goal = "Keep the environment of the operator safe."
+# With `true`, each action that an agent proposes is a dry run.
+dry_run = true
+monitor_events = "detected"
+
+[response]
+# With `true`, the dispatcher makes each action a dry run. No connector changes anything.
+dry_run = true
+# How the playbooks run: "off", "dry_run", or "live".
+playbooks = "dry_run"
+playbook_dir = "playbooks"
+
+[ingest]
+checkpoint_dir = "/var/lib/aegis/checkpoints"
+
+# The recorded attack log of the repository. AEGIS reads the file one time. The
+# checkpoint in the volume `aegis-data` stops a second read after a restart.
+# Replace this source with the sources of your environment.
+[[sources]]
+type = "file"
+name = "replay"
+path = "events/artex_style_attack.jsonl"
+
+# The operator API: the REST API and the web console at "/".
+# The server has no TLS. It listens on all addresses of the container, because Docker
+# sends the published port to the container address. `compose.yaml` publishes the port
+# only on the loopback address of the host.
+[api]
+bind = "0.0.0.0:8080"
+allow_non_loopback = true
+
+[[api.principals]]
+id = "operator@example.com"
+roles = ["analyst", "approver"]
+token_env = "AEGIS_TOKEN_OPERATOR"

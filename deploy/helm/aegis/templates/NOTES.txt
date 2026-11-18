@@ -1,0 +1,37 @@
+AEGIS runs as the Deployment {{ include "aegis.fullname" . }} in the namespace {{ .Release.Namespace }}.
+
+{{- if or .Values.api.enabled (eq .Values.storage.kind "postgres") }}
+
+The pod reads its credentials from the Secret "{{ .Values.credentials.existingSecret }}". The chart does
+not make this Secret. The pod does not start until the Secret has these keys:
+{{- if eq .Values.storage.kind "postgres" }}
+  {{ .Values.storage.postgres.secretKey }}: the database URL
+{{- end }}
+{{- if and (eq .Values.bus.kind "nats") (has .Values.bus.nats.auth.method (list "token" "user_password")) }}
+  {{ .Values.bus.nats.auth.secretKey }}: the token or the password for the NATS server
+{{- end }}
+{{- if .Values.api.enabled }}
+{{- range .Values.api.principals }}
+{{- if .tokenEnv }}
+  {{ .secretKey }}: the API token of {{ .id }} (32 characters or more)
+{{- end }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- if .Values.api.enabled }}
+
+The operator API has no TLS. To open the web console from your computer:
+
+  kubectl --namespace {{ .Release.Namespace }} port-forward service/{{ include "aegis.fullname" . }} 8080:{{ .Values.service.port }}
+
+Then open http://127.0.0.1:8080/ and enter an API token.
+{{- end }}
+{{- if .Values.networkPolicy.enabled }}
+
+The NetworkPolicy permits only DNS and the rules of `networkPolicy.egress`. Add one rule
+for each system that AEGIS connects to.
+{{- end }}
+{{- if and .Values.config.response.dryRun (not .Values.config.aegisToml) }}
+
+Each response action is a dry run. AEGIS changes nothing in your environment.
+{{- end }}

@@ -1,0 +1,16 @@
+{{- include "aegis.validate" . }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "aegis.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "aegis.labels" . | nindent 4 }}
+data:
+  # The expression removes the spaces that the indent adds to each empty line.
+  aegis.toml: |
+    {{- $text := include "aegis.config" . }}
+    {{- with .Values.config.aegisToml }}
+    {{- $text = . }}
+    {{- end }}
+    {{- regexReplaceAll "(?m)^ +$" ($text | nindent 4) "" }}

@@ -1,0 +1,36 @@
+# The build context of deploy/docker/aegis/Dockerfile is the root of the repository.
+# This file is an allow list: the context has only the files that the build of the
+# `aegis` program reads. A change to a different file does not start a new build.
+#
+# The image in deploy/docker/postgres has its own context. This file does not apply to it.
+
+# Ignore all files.
+*
+
+# The Cargo workspace.
+!Cargo.toml
+!Cargo.lock
+!crates/
+
+# The build compares the Rust version of the build image with this file.
+!rust-toolchain.toml
+
+# Files that the crates embed at compile time: the starter directory of `aegis init`, the
+# recorded attack log of `aegis demo`, and the interface of the connector plugins.
+!detections/
+!policies/
+!playbooks/
+!fixtures/
+!wit/
+
+# The license text goes into the image.
+!LICENSE
+
+# Never send these files, also if a line above permits their directory.
+**/.git
+**/.worktrees
+**/target
+**/.env
+**/.env.*
+**/*.rs.bk
+**/.DS_Store

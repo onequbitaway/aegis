@@ -1,0 +1,11 @@
+# Files that are not a part of the chart package.
+.DS_Store
+.git/
+.gitignore
+*.swp
+*.bak
+*.tmp
+*.orig
+*~
+.idea/
+.vscode/

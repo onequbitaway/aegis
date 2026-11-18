@@ -1,0 +1,1478 @@
+---
+# Source: aegis/templates/networkpolicy.yaml
+# The pod of AEGIS accepts and makes only the connections that this policy lists.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: aegis
+  namespace: aegis
+  labels:
+    helm.sh/chart: aegis-0.1.0
+    app.kubernetes.io/name: aegis
+    app.kubernetes.io/instance: aegis
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: aegis
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: aegis
+      app.kubernetes.io/instance: aegis
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # The operator API.
+    - ports:
+        - protocol: TCP
+          port: 8080
+      from:
+        - podSelector: {}
+  egress:
+    # DNS queries to the DNS service of the cluster.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+
+---
+# Source: aegis/templates/serviceaccount.yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: aegis
+  namespace: aegis
+  labels:
+    helm.sh/chart: aegis-0.1.0
+    app.kubernetes.io/name: aegis
+    app.kubernetes.io/instance: aegis
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: aegis
+# AEGIS does not call the Kubernetes API. The account has no role, and no pod gets its
+# token.
+automountServiceAccountToken: false
+
+---
+# Source: aegis/templates/configmap-starter.yaml
+# The starter files of AEGIS: the default policy, the detection pack `aegis-identity`,
+# and the sample playbooks. They are the files that `aegis init` writes. The chart reads
+# them from the repository through the links in its directory `files`.
+#
+# A key of a ConfigMap cannot have the character `/`. Each key has `__` in its place.
+# The Deployment gives each file its path again. The expression in the loop removes the
+# spaces that the indent adds to each empty line.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: aegis-starter
+  namespace: aegis
+  labels:
+    helm.sh/chart: aegis-0.1.0
+    app.kubernetes.io/name: aegis
+    app.kubernetes.io/instance: aegis
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: aegis
+data:
+  detections__aegis-identity__indicators__examples.yml: |
+    # Example indicators that show the file format.
+    #
+    # Each address is in a documentation range (RFC 5737 and RFC 3849). Each domain uses the
+    # reserved top-level domain "example" (RFC 2606). No value refers to a real system.
+    # Replace this file with indicators from your threat intelligence source.
+    indicators:
+      - type: ip
+        value: 192.0.2.200/29
+        description: Example network of a relay that an attacker uses for sign-in attempts.
+        severity: high
+        tags:
+          - attack.command-and-control
+          - attack.t1090.003
+      - type: ip
+        value: 203.0.113.224/28
+        description: Example network of a hosting provider with a bad reputation.
+        severity: medium
+        tags:
+          - attack.command-and-control
+          - attack.t1090
+      - type: ip
+        value: 2001:db8:bad::/48
+        description: Example IPv6 network of a relay that an attacker uses.
+        severity: high
+        tags:
+          - attack.command-and-control
+          - attack.t1090.003
+      - type: domain
+        value: sign-in-check.example
+        description: Example domain of a counterfeit sign-in page.
+        severity: high
+        tags:
+          - attack.initial-access
+          - attack.t1566.002
+      - type: user_agent
+        value: example-password-tester/
+        description: Example user agent of a password guessing tool.
+        severity: medium
+        tags:
+          - attack.credential-access
+          - attack.t1110
+      - type: app_id
+        value: app-example-consent-trap
+        description: Example identifier of an application that asks for consent to steal access.
+        severity: high
+        tags:
+          - attack.credential-access
+          - attack.t1528
+
+  detections__aegis-identity__pack.yml: |
+    name: aegis-identity
+    version: "0.1.0"
+    description: >-
+      Detection rules and example indicators for attacks on identity systems: consent to
+      privileged permissions, privileged role changes by workload identities, new accounts,
+      legacy authentication, multi-factor authentication abuse, and honeytoken use.
+
+  detections__aegis-identity__rules__account_locked_after_failed_sign_ins.yml: |
+    title: Account locked after failed sign-ins
+    id: 1d4f7a9c-8e26-4b3d-a5c0-6b9e2d1f8a75
+    status: test
+    description: >-
+      The identity system locked an account because of many failed sign-ins. The lock shows
+      password guessing against the account.
+    author: AEGIS project
+    references:
+      - https://attack.mitre.org/techniques/T1110/
+    logsource:
+      category: authentication
+    detection:
+      selection:
+        action: sign_in
+        outcome: failure
+      reason_code:
+        error_code: 50053
+      reason_text:
+        failure_reason|contains: account is locked
+      condition: selection and 1 of reason_*
+    falsepositives:
+      - A user who forgot a password.
+      - A device with an old stored password.
+    level: low
+    tags:
+      - attack.credential-access
+      - attack.t1110
+
+  detections__aegis-identity__rules__consent_to_privileged_permissions.yml: |
+    title: Consent to privileged application permissions
+    id: 5b0f3c2e-8a41-4d6f-9c57-2e1a7b90d314
+    status: stable
+    description: >-
+      A principal consented to permissions that give an application wide access to the
+      directory, to roles, or to mail. An attacker uses such a consent to keep access after
+      the password of the account changes.
+    author: AEGIS project
+    references:
+      - https://attack.mitre.org/techniques/T1528/
+    logsource:
+      category: user_access_management
+    detection:
+      selection:
+        action: oauth.consent_grant
+      privileged_flag:
+        privileged: true
+      privileged_scope:
+        scopes:
+          - '*.ReadWrite.All'
+          - 'RoleManagement.*'
+          - 'AppRoleAssignment.*'
+          - 'Directory.AccessAsUser.All'
+          - 'Mail.Read'
+          - 'Mail.ReadWrite'
+          - 'Mail.Send'
+          - 'full_access_as_app'
+      filter_failed:
+        outcome: failure
+      condition: selection and 1 of privileged_* and not filter_failed
+    falsepositives:
+      - An administrator who installs an approved application.
+    level: high
+    tags:
+      - attack.credential-access
+      - attack.t1528
+
+  detections__aegis-identity__rules__honeytoken_used.yml: |
+    title: Honeytoken used
+    id: 0c9e4f7a-2b6d-4e18-a3f5-7d21c6b8e940
+    status: stable
+    description: >-
+      A principal read or used a honeytoken. No approved task uses a honeytoken. Each use
+      shows an intruder or a compromised identity.
+    author: AEGIS project
+    references:
+      - https://attack.mitre.org/techniques/T1552/
+    detection:
+      selection_action:
+        action: honeytoken.trip
+      selection_attribute:
+        honeytoken_id|exists: true
+      condition: 1 of selection_*
+    falsepositives:
+      - A test of the honeytoken by the security team.
+    level: critical
+    tags:
+      - attack.credential-access
+      - attack.t1552
+
+  detections__aegis-identity__rules__legacy_mail_protocol_sign_in.yml: |
+    title: Successful sign-in with a legacy mail protocol
+    id: 9a1c5e3f-4b82-4d07-a6f9-0e3b7c2d8a51
+    status: test
+    description: >-
+      A sign-in with a legacy mail protocol succeeded. These protocols cannot do
+      multi-factor authentication, so a stolen password is sufficient.
+    author: AEGIS project
+    references:
+      - https://attack.mitre.org/techniques/T1078/004/
+    logsource:
+      category: authentication
+    detection:
+      selection:
+        action: sign_in
+        outcome: success
+        auth_protocol:
+          - imap
+          - imap4
+          - pop
+          - pop3
+          - smtp
+          - authenticated smtp
+          - authenticated_smtp
+          - mapi
+          - mapi over http
+          - mapi_over_http
+          - exchange activesync
+          - exchange_activesync
+          - exchange_active_sync
+          - exchange web services
+          - exchange_web_services
+          - autodiscover
+          - auto_discover
+      condition: selection
+    falsepositives:
+      - A device or an application that cannot use modern authentication.
+    level: medium
+    tags:
+      - attack.initial-access
+      - attack.t1078.004
+
+  detections__aegis-identity__rules__mfa_method_changed_by_script_client.yml: |
+    title: Multi-factor authentication method changed by a script client
+    id: c7a3f0e5-5d28-4b91-9e6c-4f1a8d2b7e30
+    status: test
+    description: >-
+      A client that is not a browser or an official application changed a multi-factor
+      authentication method. An attacker registers a method to keep access to an account.
+    author: AEGIS project
+    references:
+      - https://attack.mitre.org/techniques/T1556/006/
+    detection:
+      selection:
+        action: mfa.method_change
+        actor.user_agent|contains:
+          - python
+          - curl/
+          - go-http-client
+          - okhttp
+          - node-fetch
+          - axios/
+          - powershell
+      filter_failed:
+        outcome: failure
+      condition: selection and not filter_failed
+    falsepositives:
+      - An approved onboarding script.
+    level: medium
+    tags:
+      - attack.persistence
+      - attack.t1556.006
+
+  detections__aegis-identity__rules__mfa_request_denied.yml: |
+    title: Multi-factor authentication request denied
+    id: 6e2d8b4a-1f93-4c60-8d2e-9a7f3b5c0e47
+    status: test
+    description: >-
+      A sign-in had the correct password, but the user denied the multi-factor
+      authentication request or reported it as fraud. The password of the account is
+      possibly known to an attacker who sends requests until the user approves one.
+    author: AEGIS project
+    references:
+      - https://attack.mitre.org/techniques/T1621/
+    logsource:
+      category: authentication
+    detection:
+      selection:
+        action: sign_in
+        outcome: failure
+      reason_code:
+        error_code: 500121
+      reason_text:
+        failure_reason|contains:
+          - denied the authentication request
+          - declined the authentication request
+          - reported fraud
+      condition: selection and 1 of reason_*
+    falsepositives:
+      - A user who denies a request by mistake.
+    level: medium
+    tags:
+      - attack.credential-access
+      - attack.t1621
+
+  detections__aegis-identity__rules__privileged_application_permission_granted.yml: |
+    title: Privileged application permission granted
+    id: e2f8a6c1-9d47-4b53-b0e6-3a5c8d7f1b02
+    status: test
+    description: >-
+      A person granted a privileged application permission to a service principal. The
+      permission lets the application act without a signed-in user. Make sure that an
+      administrator approved the grant.
+    author: AEGIS project
+    references:
+      - https://attack.mitre.org/techniques/T1098/003/
+    logsource:
+      category: user_access_management
+    detection:
+      selection:
+        action: app.permission_grant
+        privileged: true
+      filter_workload_identity:
+        actor.kind:
+          - service_principal
+          - application
+      filter_failed:
+        outcome: failure
+      condition: selection and not 1 of filter_*
+    falsepositives:
+      - An administrator who sets up an approved application.
+    level: medium
+    tags:
+      - attack.persistence
+      - attack.t1098.003
+
+  detections__aegis-identity__rules__privileged_role_assigned_by_workload_identity.yml: |
+    title: Privileged role assigned by a workload identity
+    id: a4d7e1b9-6c35-4f02-8e7a-1b9c0d5f2a63
+    status: stable
+    description: >-
+      A service principal or an application assigned a privileged directory role or a
+      privileged application permission. Workload identities do not usually manage
+      privileged access. An attacker with a workload credential uses this step to get
+      administrator rights.
+    author: AEGIS project
+    references:
+      - https://attack.mitre.org/techniques/T1098/003/
+    logsource:
+      category: user_access_management
+    detection:
+      selection:
+        action:
+          - role.assign
+          - app.permission_grant
+        actor.kind:
+          - service_principal
+          - application
+        privileged: true
+      filter_failed:
+        outcome: failure
+      condition: selection and not filter_failed
+    falsepositives:
+      - An approved automation that manages role assignments. Add a filter for its identifier.
+    level: high
+    tags:
+      - attack.privilege-escalation
+      - attack.t1098.003
+
+  detections__aegis-identity__rules__user_created_by_workload_identity.yml: |
+    title: User account created by a workload identity
+    id: 3f6b9d2c-7e10-4a85-9b4c-5d8e2f0a7c16
+    status: test
+    description: >-
+      A service principal or an application created a user account. An attacker with a
+      workload credential makes accounts to keep access.
+    author: AEGIS project
+    references:
+      - https://attack.mitre.org/techniques/T1136/003/
+    detection:
+      selection:
+        action: user.create
+        actor.kind:
+          - service_principal
+          - application
+      filter_failed:
+        outcome: failure
+      condition: selection and not filter_failed
+    falsepositives:
+      - A provisioning service that creates accounts from the personnel system.
+    level: medium
+    tags:
+      - attack.persistence
+      - attack.t1136.003
+
+  playbooks__README.md: |
+    # Sample playbooks
+
+    These playbooks are defensive samples for the AEGIS playbook engine (`aegis-respond`). Each
+    playbook changes only the environment of the operator: the identity tenant, the firewall, the
+    EDR product, the chat channel, and the ticket system.
+
+    Copy a playbook and adapt it to your environment. The format is in
+    [`crates/respond/README.md`](../crates/respond/README.md#playbooks).
+
+    | File | Use |
+    | --- | --- |
+    | `contain-rogue-service-principal.yaml` | Contain a service principal that an attacker controls. This playbook is for the recorded attack in `fixtures/artex_style_attack.jsonl`. |
+    | `contain-compromised-user.yaml` | Stop the sessions of a compromised user account and disable the account. |
+    | `block-password-spray-source.yaml` | Block the address that a password spray comes from. |
+    | `isolate-compromised-host.yaml` | Save the evidence of a compromised host and isolate the host. |
+    | `respond-to-honeytoken-trip.yaml` | Save the evidence of a honeytoken trip, block the source address, and tell the security team. |
+
+    ## Before you use a playbook
+
+    1. Run the playbook in dry-run mode (`RunMode::DryRun`). Examine the report and the audit
+       records. A dry run changes nothing.
+    2. Make sure that a connector supports each action of the playbook. The identity actions
+       (`disable_service_principal`, `disable_user`, `kill_session`, `revoke_credential`) need the
+       Microsoft Graph connector. The other actions need a webhook endpoint for the action type.
+    3. Set your policy. Each request goes through the policy engine. A playbook cannot skip the
+       policy or an approval.
+
+    ## Conventions in the samples
+
+    - The fixed targets `security-operations`, `incident-response`, and `identity-team` are names
+      for a chat channel and two ticket queues. Your webhook automation maps them to real places.
+    - `revoke_credential` reads the key of the credential from the detection attribute
+      `credential_id`. If no detection of the incident has this attribute, the step fails and
+      sends no request.
+    - Each step that selects entities has a `max_targets` limit. A step with more targets fails
+      and sends no request. This prevents a mass change from one incorrect incident.
+    - Each step has `continue_on_error: true`. Thus a containment step that fails does not stop
+      the notification and the ticket. The run report shows each failure. Remove the field from
+      a step that must succeed before the next steps run.
+
+    The engine loads only `.yaml` and `.yml` files. It ignores this file.
+
+  playbooks__block-password-spray-source.yaml: |
+    # Block the source of a password spray in the firewall of the operator.
+    name: block-password-spray-source
+    description: >-
+      Block each address that a password spray comes from, and tell the security team.
+    trigger:
+      min_severity: medium
+      techniques_any:
+        - T1110.003  # Password Spraying
+        - T1110.004  # Credential Stuffing
+      entity_kinds:
+        - ip_address
+    steps:
+      - id: block-source-address
+        action: block_ip
+        target:
+          each_entity: ip_address
+        max_targets: 10
+        parameters:
+          direction: inbound
+          duration_hours: 24
+          comment: "AEGIS incident {{incident.id}}"
+        reason: >-
+          Incident {{incident.id}}: a password spray came from the address {{target.id}}.
+          Block it for 24 hours.
+        continue_on_error: true
+
+      - id: notify-security-team
+        action: notify
+        target:
+          fixed:
+            kind: other
+            id: security-operations
+            name: Security operations channel
+        parameters:
+          title: "{{incident.title}}"
+          severity: "{{incident.severity}}"
+        reason: >-
+          Incident {{incident.id}} ({{incident.severity}}): AEGIS blocked the source of a
+          password spray. Examine the accounts that the spray reached.
+        continue_on_error: true
+
+  playbooks__contain-compromised-user.yaml: |
+    # Contain a user account that an attacker uses.
+    name: contain-compromised-user
+    description: >-
+      Stop the sessions of a compromised user account, disable the account, and open a ticket
+      for the password reset.
+    trigger:
+      min_severity: high
+      techniques_any:
+        - T1078      # Valid Accounts, with all sub-techniques
+        - T1621      # Multi-Factor Authentication Request Generation
+        - T1556.006  # Modify Authentication Process: Multi-Factor Authentication
+      entity_kinds:
+        - user
+    steps:
+      - id: kill-user-sessions
+        action: kill_session
+        target:
+          each_entity: user
+        max_targets: 5
+        reason: >-
+          Incident {{incident.id}}: the account {{target.name}} is compromised. Stop its
+          sign-in sessions.
+        continue_on_error: true
+
+      - id: disable-user
+        action: disable_user
+        target:
+          each_entity: user
+        max_targets: 5
+        reason: >-
+          Incident {{incident.id}} ({{incident.severity}}): disable the account
+          {{target.name}} until its owner sets a new password. The operator can enable it
+          again.
+        continue_on_error: true
+
+      - id: open-ticket
+        action: open_ticket
+        target:
+          fixed:
+            kind: other
+            id: identity-team
+            name: Identity team queue
+        parameters:
+          title: "Compromised account: {{incident.title}}"
+          priority: "{{incident.severity}}"
+        reason: >-
+          Incident {{incident.id}}: reset the password and examine the authentication methods
+          of each account in the incident.
+        continue_on_error: true
+
+  playbooks__contain-rogue-service-principal.yaml: |
+    # Contain a service principal that an attacker controls.
+    #
+    # This playbook is for the attack in fixtures/artex_style_attack.jsonl: a password spray
+    # finds one user, the user consents to a rogue application, and the service principal of
+    # the application gets a new credential and a privileged role.
+    #
+    # All actions change only the tenant, the firewall, the chat channel, and the ticket system
+    # of the operator. Run the playbook in dry-run mode first.
+    #
+    # Each step continues after a failure. Thus a containment step that fails does not stop
+    # the notification and the ticket. The run report shows each failure.
+    name: contain-rogue-service-principal
+    description: >-
+      Disable a service principal that shows signs of attacker control, revoke its new
+      credential, stop the sessions of the compromised user, block the source address, and
+      tell the security team.
+    trigger:
+      min_severity: high
+      techniques_any:
+        - T1528      # Steal Application Access Token: consent to privileged scopes
+        - T1098.001  # Additional Cloud Credentials
+        - T1098.003  # Additional Cloud Roles
+      entity_kinds:
+        - service_principal
+    steps:
+      - id: disable-service-principal
+        action: disable_service_principal
+        target:
+          each_entity: service_principal
+        max_targets: 5
+        reason: >-
+          Incident {{incident.id}} ({{incident.severity}}): the service principal
+          {{target.name}} shows signs of attacker control ({{incident.techniques}}).
+          Disable it. The operator can enable it again.
+        continue_on_error: true
+
+      - id: revoke-credential
+        action: revoke_credential
+        target:
+          each_entity: service_principal
+        max_targets: 5
+        parameters:
+          # The detection for the new credential must supply the attribute credential_id.
+          key_id: "{{detection.credential_id}}"
+        reason: >-
+          Incident {{incident.id}}: remove the credential that the attacker added to the
+          service principal {{target.name}}.
+        continue_on_error: true
+
+      - id: kill-user-sessions
+        action: kill_session
+        target:
+          each_entity: user
+        max_targets: 10
+        reason: >-
+          Incident {{incident.id}}: the account {{target.name}} is compromised. Stop its
+          sign-in sessions, so that the attacker must sign in again.
+        continue_on_error: true
+
+      - id: block-source-address
+        action: block_ip
+        target:
+          each_entity: ip_address
+        max_targets: 10
+        parameters:
+          direction: inbound
+          duration_hours: 72
+          comment: "AEGIS incident {{incident.id}}"
+        reason: >-
+          Incident {{incident.id}}: the attack came from the address {{target.id}}. Block it
+          in the firewall of the operator.
+        continue_on_error: true
+
+      - id: notify-security-team
+        action: notify
+        target:
+          fixed:
+            kind: other
+            id: security-operations
+            name: Security operations channel
+        parameters:
+          title: "{{incident.title}}"
+          severity: "{{incident.severity}}"
+          techniques: "{{incident.techniques}}"
+        reason: >-
+          Incident {{incident.id}} ({{incident.severity}}): AEGIS started the containment of a
+          rogue service principal. Playbook: {{playbook.name}}.
+        continue_on_error: true
+
+      - id: open-ticket
+        action: open_ticket
+        target:
+          fixed:
+            kind: other
+            id: incident-response
+            name: Incident response queue
+        parameters:
+          title: "Rogue service principal: {{incident.title}}"
+          priority: "{{incident.severity}}"
+        reason: >-
+          Incident {{incident.id}}: record the containment of a rogue service principal and
+          the follow-up work: examine the consent grant, the role assignment, and the API
+          activity of the service principal.
+        continue_on_error: true
+
+  playbooks__isolate-compromised-host.yaml: |
+    # Isolate a host that runs attacker code.
+    name: isolate-compromised-host
+    description: >-
+      Save the evidence of a compromised host, isolate the host from the network through the
+      EDR product of the operator, and open a ticket.
+    trigger:
+      min_severity: high
+      techniques_any:
+        - T1486  # Data Encrypted for Impact
+        - T1059  # Command and Scripting Interpreter, with all sub-techniques
+        - T1003  # OS Credential Dumping, with all sub-techniques
+        - T1021  # Remote Services, with all sub-techniques
+      entity_kinds:
+        - host
+    steps:
+      - id: snapshot-evidence
+        action: snapshot_evidence
+        target:
+          each_entity: host
+        max_targets: 5
+        parameters:
+          scope: host
+        reason: >-
+          Incident {{incident.id}}: save the volatile data of the host {{target.name}} before
+          the isolation.
+        continue_on_error: true
+
+      - id: isolate-host
+        action: isolate_host
+        target:
+          each_entity: host
+        max_targets: 5
+        reason: >-
+          Incident {{incident.id}} ({{incident.severity}}): the host {{target.name}} runs
+          attacker code ({{incident.techniques}}). Isolate it from the network. The operator
+          can release it again.
+        continue_on_error: true
+
+      - id: open-ticket
+        action: open_ticket
+        target:
+          fixed:
+            kind: other
+            id: incident-response
+            name: Incident response queue
+        parameters:
+          title: "Isolated host: {{incident.title}}"
+          priority: "{{incident.severity}}"
+        reason: >-
+          Incident {{incident.id}}: examine and rebuild each isolated host.
+        continue_on_error: true
+
+  playbooks__respond-to-honeytoken-trip.yaml: |
+    # Respond to a read or a use of a honeytoken.
+    #
+    # The honeytoken detector of AEGIS maps a trip to T1552 (a decoy secret or credential),
+    # T1087 (a decoy account), or T1078 (a use of the decoy). A trip has no legitimate cause.
+    # This playbook saves the evidence and tells the security team. It does not act on the
+    # identity that touched the decoy: use an identity playbook for that.
+    name: respond-to-honeytoken-trip
+    description: >-
+      Save the evidence of a honeytoken trip, block the source address, and tell the security
+      team.
+    trigger:
+      min_severity: high
+      techniques_any:
+        - T1552  # Unsecured Credentials, with all sub-techniques
+        - T1087  # Account Discovery, with all sub-techniques
+    steps:
+      - id: snapshot-evidence
+        action: snapshot_evidence
+        target: incident_tenant
+        parameters:
+          scope: incident
+          incident_id: "{{incident.id}}"
+        reason: >-
+          Incident {{incident.id}}: save the events of the honeytoken trip before the
+          retention time of the source ends.
+        continue_on_error: true
+
+      - id: block-source-address
+        action: block_ip
+        target:
+          each_entity: ip_address
+        max_targets: 5
+        parameters:
+          direction: inbound
+          duration_hours: 72
+          comment: "AEGIS incident {{incident.id}}"
+        reason: >-
+          Incident {{incident.id}}: the address {{target.id}} touched a honeytoken. Block it.
+        continue_on_error: true
+
+      - id: notify-security-team
+        action: notify
+        target:
+          fixed:
+            kind: other
+            id: security-operations
+            name: Security operations channel
+        parameters:
+          title: "{{incident.title}}"
+          severity: "{{incident.severity}}"
+        reason: >-
+          Incident {{incident.id}} ({{incident.severity}}): an identity touched a honeytoken.
+          An attacker is in the environment. Examine the identity immediately.
+        continue_on_error: true
+
+  policies__README.md: |
+    # Response policies
+
+    This directory has the response policies that AEGIS ships. A policy tells AEGIS which
+    response actions run immediately, which actions need the approval of a person, and which
+    actions are not permitted. You own the policy. AEGIS has no rules of its own.
+
+    The policy language is [Rego](https://www.openpolicyagent.org/docs/policy-language).
+    AEGIS evaluates the policy in its own process. A policy cannot open a network connection.
+
+    ## Files
+
+    | File | Behavior |
+    | --- | --- |
+    | `default.rego` | Permits a dry run. Permits an action in the auto tier. Requires approval for an action in the gated tier. Denies all other requests. |
+    | `examples/auto_contain_service_principals.rego` | The default behavior, and containment of a service principal runs with no approval when the incident is critical. |
+    | `examples/maintenance_window.rego` | The default behavior, but each change is denied during the maintenance window that you give in the environment data. |
+    | `examples/protected_entities.rego` | The default behavior, but only a person with the role `incident_commander` can request a change to a protected entity, and the change needs approval. |
+    | `examples/protected_entities.yaml` | The list of protected entities for `protected_entities.rego`. Load it as a data file. |
+
+    Each `.rego` file is a complete policy. Load one of them. Do not load two of them
+    together: they define the same rule. When two files give different results for a request,
+    AEGIS denies the request.
+
+    ## How to use a policy
+
+    1. Copy `default.rego` or one of the examples to your configuration directory.
+    2. Read the comments at the top of the file. They describe the input, the result, and the
+       changes that you can make.
+    3. Change the file.
+    4. Put the path of the file in the `paths` setting of the policy engine. Put each data
+       file in the `data` setting.
+    5. Start AEGIS, or reload the policy.
+
+    AEGIS rejects a policy that does not compile and continues to use the policy that it has.
+    If a policy gives no valid result for a request, AEGIS denies the request.
+
+    Refer to `crates/policy/README.md` for the full description of the input, the result, and
+    the configuration.
+
+  policies__default.rego: |
+    # The default response policy of AEGIS.
+    #
+    # AEGIS asks this policy before it does a response action. You own this file. Change it to
+    # fit your environment. AEGIS has no rules of its own about which actions it can do.
+    #
+    # WHAT THIS POLICY DOES
+    #
+    #   1. A dry run is allowed. A dry run changes nothing.
+    #   2. An action in the "auto" tier is allowed.
+    #   3. An action in the "gated" tier needs the approval of a person.
+    #   4. All other requests are denied.
+    #
+    # THE INPUT
+    #
+    #   input.action.kind          The action, for example "notify" or "disable_user".
+    #                              A plugin action is an object: {"custom": "<name>"}.
+    #   input.action.target        The entity that the action changes: kind, id, name, tenant.
+    #   input.action.dry_run       true if the action must change nothing.
+    #   input.action.requested_by  The agent or the playbook that made the request.
+    #   input.action.requested_at  The time of the request (RFC 3339).
+    #   input.default_tier         "auto" for safe and reversible actions, "gated" for the rest.
+    #   input.principal            The identity that makes the request: id, kind, roles.
+    #   input.incident             The incident, if there is one: id, severity, status.
+    #                              severity is "informational", "low", "medium", "high",
+    #                              or "critical".
+    #   input.environment          Data that you give to AEGIS, for example a maintenance window.
+    #
+    # THE RESULT
+    #
+    #   The rule `decision` must be an object with these fields:
+    #
+    #     effect   "allow", "require_approval", or "deny". Mandatory.
+    #     tier     "auto" or "gated". Optional. The default is input.default_tier.
+    #     reasons  A list of sentences that explain the decision. Optional.
+    #
+    #   AEGIS denies the action if `decision` has no value, has a different shape, or cannot
+    #   be calculated.
+    #
+    # HOW TO CHANGE THIS POLICY
+    #
+    #   - To make an action need approval always, add its kind to `always_gated`.
+    #   - To let an action run with no approval, add its kind to `always_auto`.
+    #   - To deny some requests, add a rule before the dry-run rule. Refer to the files in
+    #     the `examples` directory.
+    #   - After a change, start AEGIS again or reload the policy. AEGIS rejects a policy that
+    #     does not compile and continues to use the policy that it has.
+    package aegis.response
+
+    import rego.v1
+
+    # Action kinds that need approval always. Example: {"open_ticket", "block_ip"}
+    always_gated := set()
+
+    # Action kinds that run with no approval. Example: {"kill_session"}
+    always_auto := set()
+
+    # The tier of the action. `always_gated` has priority over `always_auto`.
+    tier := "gated" if {
+    	input.action.kind in always_gated
+    } else := "auto" if {
+    	input.action.kind in always_auto
+    } else := input.default_tier
+
+    # Rule 4. No other rule matches: deny.
+    default decision := {
+    	"effect": "deny",
+    	"tier": "gated",
+    	"reasons": ["No rule of the policy permits this request."],
+    }
+
+    # Rule 1. A dry run is allowed.
+    decision := {
+    	"effect": "allow",
+    	"tier": tier,
+    	"reasons": ["The request is a dry run. A dry run changes nothing."],
+    } if {
+    	input.action.dry_run == true
+    }
+
+    # Rule 2. An action in the auto tier is allowed.
+    else := {
+    	"effect": "allow",
+    	"tier": "auto",
+    	"reasons": ["The action is in the auto tier."],
+    } if {
+    	tier == "auto"
+    }
+
+    # Rule 3. An action in the gated tier needs approval.
+    else := {
+    	"effect": "require_approval",
+    	"tier": "gated",
+    	"reasons": ["The action is in the gated tier. A person must approve it."],
+    } if {
+    	tier == "gated"
+    }
+
+  policies__examples__auto_contain_service_principals.rego: |
+    # Example: contain a service principal immediately when the incident is critical.
+    #
+    # An attack that uses a service principal can do damage in seconds. With this policy, AEGIS
+    # does not wait for a person before it contains the service principal, but only when the
+    # incident is critical. All other requests follow the default policy.
+    #
+    # To use this example, load this file in place of `default.rego`. Do not load the two
+    # files together: each of them is a complete policy.
+    #
+    # HOW TO CHANGE THIS POLICY
+    #
+    #   - Change `containment_actions` to select the actions that can run with no approval.
+    #   - Change `urgent_severities` to select the incidents to which the rule applies.
+    package aegis.response
+
+    import rego.v1
+
+    # The actions that can run with no approval on a service principal.
+    containment_actions := {"disable_service_principal", "revoke_credential", "kill_session"}
+
+    # The incident severities for which containment does not wait for a person.
+    urgent_severities := {"critical"}
+
+    urgent_containment if {
+    	input.incident.severity in urgent_severities
+    	input.action.target.kind == "service_principal"
+    	input.action.kind in containment_actions
+    }
+
+    # No other rule matches: deny.
+    default decision := {
+    	"effect": "deny",
+    	"tier": "gated",
+    	"reasons": ["No rule of the policy permits this request."],
+    }
+
+    # A dry run is allowed. A dry run changes nothing.
+    decision := {
+    	"effect": "allow",
+    	"reasons": ["The request is a dry run. A dry run changes nothing."],
+    } if {
+    	input.action.dry_run == true
+    }
+
+    # Containment of a service principal in a critical incident runs immediately.
+    else := {
+    	"effect": "allow",
+    	"tier": "auto",
+    	"reasons": ["The incident is critical and the target is a service principal. Containment does not wait for approval."],
+    } if {
+    	urgent_containment
+    }
+
+    # An action in the auto tier is allowed.
+    else := {
+    	"effect": "allow",
+    	"tier": "auto",
+    	"reasons": ["The action is in the auto tier."],
+    } if {
+    	input.default_tier == "auto"
+    }
+
+    # An action in the gated tier needs approval.
+    else := {
+    	"effect": "require_approval",
+    	"tier": "gated",
+    	"reasons": ["The action is in the gated tier. A person must approve it."],
+    } if {
+    	input.default_tier == "gated"
+    }
+
+  policies__examples__maintenance_window.rego: |
+    # Example: deny all changes during a maintenance window.
+    #
+    # During planned work on your systems, a response action can interrupt the work or can be
+    # a reaction to the work itself. With this policy, AEGIS makes no change in the window.
+    # Detection and dry runs continue.
+    #
+    # Give the window to AEGIS in the environment data:
+    #
+    #   {"maintenance_window": {"start": "2026-03-01T22:00:00Z", "end": "2026-03-02T02:00:00Z"}}
+    #
+    # The policy compares the window with the time of the request. The start is in the window.
+    # The end is not in the window. With no window in the environment data, the default
+    # policy applies.
+    #
+    # If AEGIS cannot read a time in the window, it cannot calculate the decision. Then AEGIS
+    # denies each request that is not a dry run.
+    #
+    # To use this example, load this file in place of `default.rego`. Do not load the two
+    # files together: each of them is a complete policy.
+    package aegis.response
+
+    import rego.v1
+
+    in_maintenance_window if {
+    	window := input.environment.maintenance_window
+    	requested := time.parse_rfc3339_ns(input.action.requested_at)
+    	requested >= time.parse_rfc3339_ns(window.start)
+    	requested < time.parse_rfc3339_ns(window.end)
+    }
+
+    # No other rule matches: deny.
+    default decision := {
+    	"effect": "deny",
+    	"tier": "gated",
+    	"reasons": ["No rule of the policy permits this request."],
+    }
+
+    # A dry run is allowed. A dry run changes nothing.
+    decision := {
+    	"effect": "allow",
+    	"reasons": ["The request is a dry run. A dry run changes nothing."],
+    } if {
+    	input.action.dry_run == true
+    }
+
+    # In the maintenance window, no action changes the environment.
+    else := {
+    	"effect": "deny",
+    	"reasons": ["The request is in the maintenance window. No changes are permitted."],
+    } if {
+    	in_maintenance_window
+    }
+
+    # An action in the auto tier is allowed.
+    else := {
+    	"effect": "allow",
+    	"tier": "auto",
+    	"reasons": ["The action is in the auto tier."],
+    } if {
+    	input.default_tier == "auto"
+    }
+
+    # An action in the gated tier needs approval.
+    else := {
+    	"effect": "require_approval",
+    	"tier": "gated",
+    	"reasons": ["The action is in the gated tier. A person must approve it."],
+    } if {
+    	input.default_tier == "gated"
+    }
+
+  policies__examples__protected_entities.rego: |
+    # Example: protect named entities from automatic changes.
+    #
+    # Some entities must stay available in an incident, for example an emergency access
+    # account. With this policy:
+    #
+    #   - An agent or a playbook cannot change a protected entity.
+    #   - A person with the role "incident_commander" can request a change to a protected
+    #     entity. A different person must approve the change.
+    #   - All other requests follow the default policy.
+    #
+    # The list of protected entities is in the data file `protected_entities.yaml`. Load the
+    # data file together with this policy. If the list is not loaded, this policy denies each
+    # request that is not a dry run, because it cannot know which entities are protected.
+    #
+    # To use this example, load this file in place of `default.rego`. Do not load the two
+    # files together: each of them is a complete policy.
+    package aegis.response
+
+    import rego.v1
+
+    # The role that can request a change to a protected entity.
+    override_role := "incident_commander"
+
+    list_is_loaded if {
+    	is_array(data.aegis.protected_entities)
+    }
+
+    target_is_protected if {
+    	some entity in data.aegis.protected_entities
+    	entity.kind == input.action.target.kind
+    	entity.id == input.action.target.id
+    }
+
+    requester_can_override if {
+    	input.principal.kind == "human"
+    	override_role in input.principal.roles
+    }
+
+    # No other rule matches: deny.
+    default decision := {
+    	"effect": "deny",
+    	"tier": "gated",
+    	"reasons": ["No rule of the policy permits this request."],
+    }
+
+    # A dry run is allowed. A dry run changes nothing.
+    decision := {
+    	"effect": "allow",
+    	"reasons": ["The request is a dry run. A dry run changes nothing."],
+    } if {
+    	input.action.dry_run == true
+    }
+
+    # Without the list, the policy cannot know which entities are protected.
+    else := {
+    	"effect": "deny",
+    	"reasons": ["The list of protected entities is not loaded."],
+    } if {
+    	not list_is_loaded
+    }
+
+    # An incident commander can request a change to a protected entity.
+    else := {
+    	"effect": "require_approval",
+    	"tier": "gated",
+    	"reasons": ["The target is a protected entity. An incident commander requested the change, and a different person must approve it."],
+    } if {
+    	target_is_protected
+    	requester_can_override
+    }
+
+    # No other identity can change a protected entity.
+    else := {
+    	"effect": "deny",
+    	"reasons": ["The target is a protected entity. Only an incident commander can request a change to it."],
+    } if {
+    	target_is_protected
+    }
+
+    # An action in the auto tier is allowed.
+    else := {
+    	"effect": "allow",
+    	"tier": "auto",
+    	"reasons": ["The action is in the auto tier."],
+    } if {
+    	input.default_tier == "auto"
+    }
+
+    # An action in the gated tier needs approval.
+    else := {
+    	"effect": "require_approval",
+    	"tier": "gated",
+    	"reasons": ["The action is in the gated tier. A person must approve it."],
+    } if {
+    	input.default_tier == "gated"
+    }
+
+  policies__examples__protected_entities.yaml: |
+    # The entities that the policy `protected_entities.rego` protects.
+    #
+    # Each entry has the kind and the identifier of one entity, as AEGIS gets them from the
+    # source system. Examples of kinds: user, service_principal, application, host, device.
+    #
+    # Replace these entries with the entities of your environment.
+    aegis:
+      protected_entities:
+        - kind: user
+          id: emergency-access@example.com
+        - kind: service_principal
+          id: sp-backup-operator
+
+
+---
+# Source: aegis/templates/configmap.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: aegis
+  namespace: aegis
+  labels:
+    helm.sh/chart: aegis-0.1.0
+    app.kubernetes.io/name: aegis
+    app.kubernetes.io/instance: aegis
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: aegis
+data:
+  # The expression removes the spaces that the indent adds to each empty line.
+  aegis.toml: |
+    # The chart made this file from its values. A relative path starts at /etc/aegis.
+
+    [modules]
+    enabled = ["ingest","detection","monitor","hunter","analyst","responder","deception","reporter","api"]
+
+    [telemetry]
+    service_name = "aegis"
+    log_format = "json"
+    log_level = "info"
+
+    [bus]
+    kind = "memory"
+
+    [storage]
+    kind = "memory"
+
+    [audit]
+    kind = "file"
+    path = "/var/lib/aegis/audit.jsonl"
+
+    [policy]
+    paths = ["policies/default.rego"]
+
+    [rbac.roles]
+    "admin" = ["view_incidents","view_audit","manage_policy","manage_connectors","run_playbooks","administer"]
+    "analyst" = ["view_incidents","view_audit"]
+    "approver" = ["view_incidents","approve_actions"]
+
+    [approval]
+    four_eyes = true
+    humans_only = true
+
+    [detection]
+    pack = "detections/aegis-identity"
+
+    [agents]
+    goal = "Keep the environment of the operator safe."
+    dry_run = true
+
+    [response]
+    dry_run = true
+    playbooks = "dry_run"
+    playbook_dir = "playbooks"
+
+    [ingest]
+    checkpoint_dir = "/var/lib/aegis/checkpoints"
+
+    # The server has no TLS. It listens on the pod address for the Service and the probes.
+    [api]
+    bind = "0.0.0.0:8080"
+    allow_non_loopback = true
+    console = true
+
+    [[api.principals]]
+    id = "operator@example.com"
+    kind = "human"
+    roles = ["analyst","approver"]
+    token_env = "AEGIS_TOKEN_OPERATOR"
+
+---
+# Source: aegis/templates/pvc.yaml
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: aegis-data
+  namespace: aegis
+  labels:
+    helm.sh/chart: aegis-0.1.0
+    app.kubernetes.io/name: aegis
+    app.kubernetes.io/instance: aegis
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: aegis
+  annotations:
+    # The claim holds the audit log. `helm uninstall` does not remove it.
+    helm.sh/resource-policy: keep
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+
+---
+# Source: aegis/templates/service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: aegis
+  namespace: aegis
+  labels:
+    helm.sh/chart: aegis-0.1.0
+    app.kubernetes.io/name: aegis
+    app.kubernetes.io/instance: aegis
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: aegis
+spec:
+  type: ClusterIP
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+      protocol: TCP
+  selector:
+    app.kubernetes.io/name: aegis
+    app.kubernetes.io/instance: aegis
+
+---
+# Source: aegis/templates/deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: aegis
+  namespace: aegis
+  labels:
+    helm.sh/chart: aegis-0.1.0
+    app.kubernetes.io/name: aegis
+    app.kubernetes.io/instance: aegis
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: aegis
+spec:
+  # One replica: the file audit log has one writer, and the state of the detection
+  # engine is in the memory of one process.
+  replicas: 1
+  # Stop the old pod before the new pod starts. Two pods cannot write one audit log, and
+  # a ReadWriteOnce volume goes to one node.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: aegis
+      app.kubernetes.io/instance: aegis
+  template:
+    metadata:
+      labels:
+        helm.sh/chart: aegis-0.1.0
+        app.kubernetes.io/name: aegis
+        app.kubernetes.io/instance: aegis
+        app.kubernetes.io/version: "0.1.0"
+        app.kubernetes.io/managed-by: Helm
+        app.kubernetes.io/part-of: aegis
+      annotations:
+        # A change of the configuration or of the starter files starts a new pod.
+        checksum/config: b2ea27ffedfd91930918f5df7473b128ecc460490a90172414e016cacd601cc0
+        checksum/starter: 29155cfa0dfc1c4e3f86a3ca8226f8be953346795a770e9aa1684ffbf5e51067
+    spec:
+      serviceAccountName: aegis
+      # AEGIS does not call the Kubernetes API.
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      securityContext:
+        fsGroup: 65532
+        fsGroupChangePolicy: OnRootMismatch
+        runAsGroup: 65532
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      terminationGracePeriodSeconds: 60
+      containers:
+        - name: aegis
+          image: registry.example.com/aegis/aegis:0.1.0
+          imagePullPolicy: IfNotPresent
+          args: ["run", "--config", "/etc/aegis/aegis.toml"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+              - ALL
+            readOnlyRootFilesystem: true
+          env:
+            - name: AEGIS_TOKEN_OPERATOR
+              valueFrom:
+                secretKeyRef:
+                  name: aegis-credentials
+                  key: operator-token
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            failureThreshold: 60
+            periodSeconds: 2
+            timeoutSeconds: 2
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            failureThreshold: 3
+            periodSeconds: 20
+            timeoutSeconds: 3
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            failureThreshold: 3
+            periodSeconds: 10
+            timeoutSeconds: 3
+          resources:
+            limits:
+              memory: 1Gi
+            requests:
+              cpu: 100m
+              memory: 128Mi
+          volumeMounts:
+            - name: config
+              mountPath: /etc/aegis
+              readOnly: true
+            - name: data
+              mountPath: /var/lib/aegis
+            - name: plugins
+              mountPath: /plugins
+              readOnly: true
+      volumes:
+        # /etc/aegis: the configuration file and the starter files, as one read-only
+        # directory.
+        - name: config
+          projected:
+            defaultMode: 0444
+            sources:
+              - configMap:
+                  name: aegis
+                  items:
+                    - key: aegis.toml
+                      path: aegis.toml
+              - configMap:
+                  name: aegis-starter
+                  items:
+                    - key: detections__aegis-identity__indicators__examples.yml
+                      path: detections/aegis-identity/indicators/examples.yml
+                    - key: detections__aegis-identity__pack.yml
+                      path: detections/aegis-identity/pack.yml
+                    - key: detections__aegis-identity__rules__account_locked_after_failed_sign_ins.yml
+                      path: detections/aegis-identity/rules/account_locked_after_failed_sign_ins.yml
+                    - key: detections__aegis-identity__rules__consent_to_privileged_permissions.yml
+                      path: detections/aegis-identity/rules/consent_to_privileged_permissions.yml
+                    - key: detections__aegis-identity__rules__honeytoken_used.yml
+                      path: detections/aegis-identity/rules/honeytoken_used.yml
+                    - key: detections__aegis-identity__rules__legacy_mail_protocol_sign_in.yml
+                      path: detections/aegis-identity/rules/legacy_mail_protocol_sign_in.yml
+                    - key: detections__aegis-identity__rules__mfa_method_changed_by_script_client.yml
+                      path: detections/aegis-identity/rules/mfa_method_changed_by_script_client.yml
+                    - key: detections__aegis-identity__rules__mfa_request_denied.yml
+                      path: detections/aegis-identity/rules/mfa_request_denied.yml
+                    - key: detections__aegis-identity__rules__privileged_application_permission_granted.yml
+                      path: detections/aegis-identity/rules/privileged_application_permission_granted.yml
+                    - key: detections__aegis-identity__rules__privileged_role_assigned_by_workload_identity.yml
+                      path: detections/aegis-identity/rules/privileged_role_assigned_by_workload_identity.yml
+                    - key: detections__aegis-identity__rules__user_created_by_workload_identity.yml
+                      path: detections/aegis-identity/rules/user_created_by_workload_identity.yml
+                    - key: playbooks__README.md
+                      path: playbooks/README.md
+                    - key: playbooks__block-password-spray-source.yaml
+                      path: playbooks/block-password-spray-source.yaml
+                    - key: playbooks__contain-compromised-user.yaml
+                      path: playbooks/contain-compromised-user.yaml
+                    - key: playbooks__contain-rogue-service-principal.yaml
+                      path: playbooks/contain-rogue-service-principal.yaml
+                    - key: playbooks__isolate-compromised-host.yaml
+                      path: playbooks/isolate-compromised-host.yaml
+                    - key: playbooks__respond-to-honeytoken-trip.yaml
+                      path: playbooks/respond-to-honeytoken-trip.yaml
+                    - key: policies__README.md
+                      path: policies/README.md
+                    - key: policies__default.rego
+                      path: policies/default.rego
+                    - key: policies__examples__auto_contain_service_principals.rego
+                      path: policies/examples/auto_contain_service_principals.rego
+                    - key: policies__examples__maintenance_window.rego
+                      path: policies/examples/maintenance_window.rego
+                    - key: policies__examples__protected_entities.rego
+                      path: policies/examples/protected_entities.rego
+                    - key: policies__examples__protected_entities.yaml
+                      path: policies/examples/protected_entities.yaml
+        # /var/lib/aegis: the audit log and the checkpoints of the sources.
+        - name: data
+          persistentVolumeClaim:
+            claimName: aegis-data
+        # /plugins: the connector plugins.
+        - name: plugins
+          emptyDir:
+            sizeLimit: 1Mi

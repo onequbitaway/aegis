@@ -1,0 +1,145 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "aegis.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "aegis.labels" . | nindent 4 }}
+spec:
+  # One replica: the file audit log has one writer, and the state of the detection
+  # engine is in the memory of one process.
+  replicas: {{ int .Values.replicaCount }}
+  # Stop the old pod before the new pod starts. Two pods cannot write one audit log, and
+  # a ReadWriteOnce volume goes to one node.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "aegis.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "aegis.labels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        # A change of the configuration or of the starter files starts a new pod.
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        checksum/starter: {{ include (print $.Template.BasePath "/configmap-starter.yaml") . | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "aegis.serviceAccountName" . }}
+      # AEGIS does not call the Kubernetes API.
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      terminationGracePeriodSeconds: {{ int .Values.terminationGracePeriodSeconds }}
+      containers:
+        - name: aegis
+          image: {{ include "aegis.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args: ["run", "--config", "/etc/aegis/aegis.toml"]
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          {{- with (include "aegis.env" . | trim) }}
+          env:
+            {{- . | nindent 12 }}
+          {{- end }}
+          {{- if .Values.api.enabled }}
+          ports:
+            - name: http
+              containerPort: {{ int .Values.api.port }}
+              protocol: TCP
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            {{- toYaml .Values.probes.startup | nindent 12 }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            {{- toYaml .Values.probes.liveness | nindent 12 }}
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            {{- toYaml .Values.probes.readiness | nindent 12 }}
+          {{- end }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/aegis
+              readOnly: true
+            - name: data
+              mountPath: /var/lib/aegis
+            - name: plugins
+              mountPath: /plugins
+              readOnly: true
+            {{- with .Values.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+      volumes:
+        # /etc/aegis: the configuration file and the starter files, as one read-only
+        # directory.
+        - name: config
+          projected:
+            defaultMode: 0444
+            sources:
+              - configMap:
+                  name: {{ include "aegis.fullname" . }}
+                  items:
+                    - key: aegis.toml
+                      path: aegis.toml
+              {{- if .Values.config.starterFiles }}
+              - configMap:
+                  name: {{ include "aegis.fullname" . }}-starter
+                  items:
+                    {{- range $path, $_ := .Files.Glob "files/**" }}
+                    - key: {{ trimPrefix "files/" $path | replace "/" "__" }}
+                      path: {{ trimPrefix "files/" $path }}
+                    {{- end }}
+              {{- end }}
+        # /var/lib/aegis: the audit log and the checkpoints of the sources.
+        - name: data
+          {{- if .Values.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ include "aegis.claimName" . }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+        # /plugins: the connector plugins.
+        - name: plugins
+          {{- if .Values.plugins.enabled }}
+          {{- toYaml .Values.plugins.volume | nindent 10 }}
+          {{- else }}
+          emptyDir:
+            sizeLimit: 1Mi
+          {{- end }}
+        {{- with .Values.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

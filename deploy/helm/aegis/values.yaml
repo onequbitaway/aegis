@@ -1,0 +1,293 @@
+# The values of the AEGIS chart.
+#
+# The defaults run one AEGIS process that changes nothing in your environment: each
+# response action is a dry run, the bus and the storage are in the memory of the process,
+# and no model is configured. Refer to deploy/README.md in the repository.
+
+# -- The number of AEGIS processes. Keep the value 1.
+# The file audit log has one writer, and the state of the detection engine is in the
+# memory of one process. The chart refuses a value that is larger than 1.
+replicaCount: 1
+
+image:
+  # -- The repository of the AEGIS image. The project publishes no image at this time.
+  # Build the image, push it to your registry, and set this value.
+  repository: registry.example.com/aegis/aegis
+  # -- The tag of the image. The default is the `appVersion` of the chart.
+  tag: ""
+  # -- The digest of the image, for example `sha256:...`. If it is set, the chart uses
+  # the digest and not the tag.
+  digest: ""
+  pullPolicy: IfNotPresent
+
+# -- The secrets for a private registry.
+imagePullSecrets: []
+
+nameOverride: ""
+fullnameOverride: ""
+
+credentials:
+  # -- The name of a Secret that you make before the installation. The chart reads all
+  # credentials from this Secret and makes no Secret. The values below give the key of
+  # each credential.
+  existingSecret: aegis-credentials
+
+config:
+  # -- The full text of `aegis.toml`. If it is set, the chart uses this text and ignores
+  # the other values of `config`, `bus`, `storage`, `audit`, `api`, and `plugins` for
+  # the file. The chart still gives the credentials as environment variables.
+  aegisToml: ""
+  # -- The subsystems that the process runs. The chart adds `api` if `api.enabled` is true.
+  modules:
+    - ingest
+    - detection
+    - monitor
+    - hunter
+    - analyst
+    - responder
+    - deception
+    - reporter
+  telemetry:
+    serviceName: aegis
+    # -- `text` or `json`.
+    logFormat: json
+    # -- `trace`, `debug`, `info`, `warn`, `error`, or `off`.
+    logLevel: info
+    # -- The base URL of an OTLP/HTTP collector. Add an egress rule for the collector.
+    otlpEndpoint: ""
+  # -- Write the starter files of the binary to /etc/aegis before the start: the default
+  # policy, the detection pack `aegis-identity`, and the sample playbooks.
+  starterFiles: true
+  policy:
+    # -- The Rego files of the policy. A relative path starts at /etc/aegis.
+    paths:
+      - policies/default.rego
+  detection:
+    # -- The directory of the detection pack.
+    pack: detections/aegis-identity
+  # -- The permissions of each role. A principal of the operator API names its roles.
+  rbacRoles:
+    analyst: [view_incidents, view_audit]
+    approver: [view_incidents, approve_actions]
+    admin: [view_incidents, view_audit, manage_policy, manage_connectors, run_playbooks, administer]
+  approval:
+    fourEyes: true
+    humansOnly: true
+  agents:
+    goal: Keep the environment of the operator safe.
+    # -- With `true`, each action that an agent proposes is a dry run.
+    dryRun: true
+  response:
+    # -- With `true`, the dispatcher makes each action a dry run.
+    dryRun: true
+    # -- How the playbooks run: `off`, `dry_run`, or `live`.
+    playbooks: dry_run
+    playbookDir: playbooks
+  # -- TOML text that the chart adds to the end of `aegis.toml`. Use it for tables that
+  # the values do not have, for example `[[sources]]`, `[model.providers.local]`, and
+  # `[response.webhook]`. Do not put a secret here.
+  extraToml: ""
+
+bus:
+  # -- `memory` (in the process) or `nats` (an external NATS server with JetStream).
+  kind: memory
+  nats:
+    # -- The URLs of the NATS servers. Use `tls://` for TLS. Do not put credentials in a URL.
+    urls:
+      - nats://nats.nats.svc.cluster.local:4222
+    auth:
+      # -- `none`, `token`, `user_password`, or `credentials_file`.
+      method: none
+      # -- The user name for `user_password`.
+      user: aegis
+      # -- The key of `credentials.existingSecret` that holds the token or the password.
+      secretKey: nats-credential
+      # -- The path of the credentials file for `credentials_file`. Mount the file with
+      # `extraVolumes` and `extraVolumeMounts`.
+      credentialsFile: ""
+    tls:
+      # -- Refuse a connection that has no TLS.
+      required: false
+      # -- The path of a file with the certificate authorities to trust. Mount the file
+      # with `extraVolumes` and `extraVolumeMounts`.
+      caFile: ""
+    stream:
+      name: AEGIS
+      # -- The number of copies of the stream: 1 to 5. A value larger than 1 needs a
+      # NATS cluster.
+      replicas: 1
+      # -- Let AEGIS create and update the stream.
+      manage: true
+
+storage:
+  # -- `memory` (the data goes away when the process stops) or `postgres`.
+  kind: memory
+  postgres:
+    # -- The key of `credentials.existingSecret` that holds the database URL, for example
+    # `postgres://aegis:PASSWORD@db.example.com:5432/aegis?sslmode=verify-full`.
+    # The server must have the `age` and `vector` extensions.
+    secretKey: database-url
+    maxConnections: 10
+
+audit:
+  # -- `file` (a file in the volume of /var/lib/aegis) or `postgres` (the audit table of
+  # the database; `storage.kind` must be `postgres`).
+  kind: file
+
+api:
+  # -- Run the operator API: the REST API and the web console. The probes use it.
+  enabled: true
+  port: 8080
+  # -- Serve the web console at `/`.
+  console: true
+  # -- The principals of the API. Each request needs the bearer token of one principal.
+  principals:
+    - # -- The identifier of the principal.
+      id: operator@example.com
+      # -- `human`, `agent`, or `system`.
+      kind: human
+      # -- Names of `config.rbacRoles`.
+      roles: [analyst, approver]
+      # -- The environment variable that gives the token to AEGIS.
+      tokenEnv: AEGIS_TOKEN_OPERATOR
+      # -- The key of `credentials.existingSecret` that holds the token: 32 characters
+      # or more.
+      secretKey: operator-token
+
+plugins:
+  # -- Load the connector plugins of the directory /plugins.
+  enabled: false
+  # -- The volume with the plugins, as a Kubernetes volume source. The default is an
+  # empty directory.
+  volume:
+    emptyDir: {}
+
+persistence:
+  # -- Keep /var/lib/aegis (the audit log and the checkpoints) in a PersistentVolumeClaim.
+  # With `false`, the data goes away with the pod.
+  enabled: true
+  # -- The name of a claim that you made. The chart then makes no claim.
+  existingClaim: ""
+  # -- The storage class. An empty value selects the default class of the cluster.
+  storageClass: ""
+  accessModes:
+    - ReadWriteOnce
+  size: 1Gi
+  annotations: {}
+
+serviceAccount:
+  # -- Make a ServiceAccount. AEGIS does not call the Kubernetes API, so the account has
+  # no role and the pod gets no token.
+  create: true
+  name: ""
+  annotations: {}
+
+service:
+  type: ClusterIP
+  port: 8080
+  annotations: {}
+
+ingress:
+  # -- Make an Ingress for the operator API. The API has no TLS: configure TLS here.
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts:
+    - host: aegis.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+  #  - secretName: aegis-tls
+  #    hosts:
+  #      - aegis.example.com
+
+networkPolicy:
+  # -- Make a NetworkPolicy. It refuses each connection that the values do not permit.
+  # Your cluster must have a network plugin that applies network policies.
+  enabled: true
+  # -- The peers that can connect to the operator API. The default is each pod of the
+  # same namespace. Add the pods of your ingress controller.
+  ingressFrom:
+    - podSelector: {}
+  # -- Permit DNS queries to the DNS service of the cluster.
+  allowDns: true
+  dns:
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: kube-system
+    podSelector:
+      matchLabels:
+        k8s-app: kube-dns
+  # -- The egress rules, in the format of a NetworkPolicy. The default permits no
+  # connection but DNS. Add one rule for each system that AEGIS connects to: PostgreSQL,
+  # NATS, a model server, a trace collector, and the APIs of your sources and connectors.
+  egress: []
+  #  - to:
+  #      - ipBlock:
+  #          cidr: 10.0.20.15/32
+  #    ports:
+  #      - protocol: TCP
+  #        port: 5432
+
+# -- More environment variables for the container, in the format of a container `env`.
+# Use `valueFrom.secretKeyRef` for a secret, for example the client secret of a source.
+extraEnv: []
+# -- More volumes for the pod.
+extraVolumes: []
+# -- More volume mounts for the container.
+extraVolumeMounts: []
+
+podAnnotations: {}
+podLabels: {}
+
+# -- The security context of the pod. The image runs as the numeric user 65532.
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  fsGroup: 65532
+  fsGroupChangePolicy: OnRootMismatch
+  seccompProfile:
+    type: RuntimeDefault
+
+# -- The security context of each container.
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+# -- The resources of the container. An idle process with no model and no plugin uses
+# less than 32Mi of memory.
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    memory: 1Gi
+
+# -- The probes use `GET /healthz` of the operator API. With `api.enabled: false`, the
+# process opens no listener and the pod has no probe.
+probes:
+  startup:
+    periodSeconds: 2
+    timeoutSeconds: 2
+    failureThreshold: 60
+  liveness:
+    periodSeconds: 20
+    timeoutSeconds: 3
+    failureThreshold: 3
+  readiness:
+    periodSeconds: 10
+    timeoutSeconds: 3
+    failureThreshold: 3
+
+# -- The time that the process gets to complete the work that is in progress.
+terminationGracePeriodSeconds: 60
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+priorityClassName: ""

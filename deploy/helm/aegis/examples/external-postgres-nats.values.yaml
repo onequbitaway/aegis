@@ -1,0 +1,65 @@
+# Example values: AEGIS with an external PostgreSQL server and an external NATS server.
+#
+# Make the Secret first. Replace each placeholder:
+#
+#   kubectl --namespace aegis create secret generic aegis-credentials \
+#     --from-literal=database-url='postgres://aegis:PASSWORD@db.example.com:5432/aegis?sslmode=verify-full' \
+#     --from-literal=nats-credential='NATS_PASSWORD' \
+#     --from-literal=operator-token="$(openssl rand -hex 32)"
+#
+# Then install the chart with this file:
+#
+#   helm upgrade --install aegis deploy/helm/aegis --namespace aegis \
+#     --values deploy/helm/aegis/examples/external-postgres-nats.values.yaml
+
+image:
+  # Replace with the repository of your registry.
+  repository: registry.example.com/aegis/aegis
+  tag: "0.1.0"
+
+credentials:
+  existingSecret: aegis-credentials
+
+storage:
+  kind: postgres
+  postgres:
+    secretKey: database-url
+    maxConnections: 10
+
+audit:
+  # The audit table of the database. All records are then in PostgreSQL.
+  kind: postgres
+
+bus:
+  kind: nats
+  nats:
+    urls:
+      - tls://nats.example.com:4222
+    auth:
+      method: user_password
+      user: aegis
+      secretKey: nats-credential
+    tls:
+      required: true
+    stream:
+      name: AEGIS
+      replicas: 1
+      manage: true
+
+networkPolicy:
+  enabled: true
+  egress:
+    # PostgreSQL. Replace the address.
+    - to:
+        - ipBlock:
+            cidr: 10.0.20.15/32
+      ports:
+        - protocol: TCP
+          port: 5432
+    # NATS. Replace the address.
+    - to:
+        - ipBlock:
+            cidr: 10.0.20.16/32
+      ports:
+        - protocol: TCP
+          port: 4222

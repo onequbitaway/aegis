@@ -1,0 +1,21 @@
+{{- if .Values.config.starterFiles }}
+# The starter files of AEGIS: the default policy, the detection pack `aegis-identity`,
+# and the sample playbooks. They are the files that `aegis init` writes. The chart reads
+# them from the repository through the links in its directory `files`.
+#
+# A key of a ConfigMap cannot have the character `/`. Each key has `__` in its place.
+# The Deployment gives each file its path again. The expression in the loop removes the
+# spaces that the indent adds to each empty line.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "aegis.fullname" . }}-starter
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "aegis.labels" . | nindent 4 }}
+data:
+  {{- range $path, $_ := .Files.Glob "files/**" }}
+  {{ trimPrefix "files/" $path | replace "/" "__" }}: |
+    {{- regexReplaceAll "(?m)^ +$" ($.Files.Get $path | nindent 4) "" }}
+  {{- end }}
+{{- end }}

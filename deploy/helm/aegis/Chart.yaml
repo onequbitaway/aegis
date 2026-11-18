@@ -1,0 +1,18 @@
+apiVersion: v2
+name: aegis
+description: AEGIS, a defensive agentic security framework. The chart runs one AEGIS process.
+type: application
+# The version of the chart.
+version: 0.1.0
+# The version of AEGIS. It is the default tag of the image.
+appVersion: "0.1.0"
+kubeVersion: ">=1.25.0-0"
+home: https://github.com/onequbitaway/aegis
+sources:
+  - https://github.com/onequbitaway/aegis
+keywords:
+  - security
+  - detection
+  - incident-response
+annotations:
+  licenses: MIT
