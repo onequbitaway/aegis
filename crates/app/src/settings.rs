@@ -21,9 +21,16 @@
 //! | `sources` | A list of [`SourceConfig`] | No |
 //! | `ingest` | `checkpoint_dir` and `retry` | No |
 //! | `plugins` | `dir` and `limits` | No |
+//! | `api` | `aegis_api::ApiConfig` | Only with the module `api` |
 //!
 //! A section name that is not in this table is an error. Each section rejects a key that
 //! it does not know.
+//!
+//! # The operator API
+//!
+//! The module `api` in the module set starts the operator API. It needs the Cargo feature
+//! `api`, the `[api]` section, and one enabled agent or more.
+//! [`Settings::check_api_module`] checks these rules.
 //!
 //! # Paths
 //!
@@ -51,7 +58,7 @@ use aegis_respond::{GraphConfig, Route, WebhookConfig};
 use serde::{Deserialize, Serialize};
 
 /// The names of the sections that the composition root reads.
-pub const SECTIONS: [&str; 15] = [
+pub const SECTIONS: [&str; 16] = [
     "modules",
     "telemetry",
     "bus",
@@ -67,7 +74,11 @@ pub const SECTIONS: [&str; 15] = [
     "sources",
     "ingest",
     "plugins",
+    API_SECTION,
 ];
+
+/// The name of the section of the operator API.
+pub const API_SECTION: &str = "api";
 
 /// The default goal of the operator.
 pub const DEFAULT_GOAL: &str = "Keep the environment of the operator safe.";
@@ -245,7 +256,21 @@ pub struct Settings {
     pub ingest: IngestSettings,
     /// The `[plugins]` section.
     pub plugins: Option<PluginSettings>,
+    /// The `[api]` section: the operator API.
+    ///
+    /// `None` means that the document has no `[api]` section, or that a different
+    /// component of the process reads the section.
+    #[cfg(feature = "api")]
+    pub api: Option<aegis_api::ApiConfig>,
 }
+
+/// The value of the `[api]` section in this build.
+#[cfg(feature = "api")]
+type ApiSection = Option<aegis_api::ApiConfig>;
+
+/// A build without the Cargo feature `api` keeps no value of the `[api]` section.
+#[cfg(not(feature = "api"))]
+type ApiSection = ();
 
 /// A table that accepts no key.
 #[derive(Deserialize)]
@@ -586,11 +611,21 @@ impl Settings {
         let sources = take(Self::sources(config, base_dir), &mut problems);
         let ingest = take(Self::ingest(config, base_dir), &mut problems);
         let plugins = take(Self::plugins(config, base_dir), &mut problems);
+        let api = take(Self::api(config, extra_sections), &mut problems);
+        #[cfg(feature = "api")]
+        if let (Some(Some(api)), Some(agents), Some(detection)) = (&api, &agents, &detection)
+            && let Err(error) = Self::api_durable_names(api, agents, &detection.runner)
+        {
+            problems.push(error);
+        }
 
         if !problems.is_empty() {
             return Err(problems);
         }
         let settings = (|| {
+            // A build without the Cargo feature `api` keeps no value of the section.
+            #[cfg(not(feature = "api"))]
+            api?;
             Some(Self {
                 base_dir: base_dir.to_path_buf(),
                 modules: modules?,
@@ -608,6 +643,8 @@ impl Settings {
                 sources: sources?,
                 ingest: ingest?,
                 plugins: plugins?,
+                #[cfg(feature = "api")]
+                api: api?,
             })
         })();
         settings.ok_or_else(|| vec![Error::Config("the configuration is not valid".to_owned())])
@@ -816,6 +853,131 @@ impl Settings {
             limits: section.limits,
         }))
     }
+
+    /// Reads and checks the `[api]` section.
+    ///
+    /// A caller that names `api` in `extra_sections` reads the section itself. The
+    /// function then does not examine it.
+    #[cfg(feature = "api")]
+    fn api(config: &Config, extra_sections: &[String]) -> Result<ApiSection> {
+        if !config.has_section(API_SECTION) || extra_sections.iter().any(|name| name == API_SECTION)
+        {
+            return Ok(None);
+        }
+        let api: aegis_api::ApiConfig = config.section(API_SECTION)?;
+        api.validate()
+            .and_then(|()| api.validate_bind())
+            .map_err(|error| section_error(API_SECTION, error))?;
+        Ok(Some(api))
+    }
+
+    /// Checks that the notification task of the API has durable names of its own.
+    ///
+    /// The task adds `-approvals` and `-incidents` to its name. Two subscribers with one
+    /// durable name share the messages, so each one gets only a part of them. The agent
+    /// runtime would then not see each incident.
+    #[cfg(feature = "api")]
+    fn api_durable_names(
+        api: &aegis_api::ApiConfig,
+        agents: &AgentSettings,
+        runner: &BusRunnerConfig,
+    ) -> Result<()> {
+        let Some(consumer) = &api.chatops.notifications.durable_consumer else {
+            return Ok(());
+        };
+        let mut taken = vec![runner.durable_name.clone()];
+        if let Some(agents) = &agents.runtime.bus_consumer {
+            taken.push(format!("{agents}-tasks"));
+            taken.push(format!("{agents}-incidents"));
+        }
+        let wanted = [
+            format!("{consumer}-approvals"),
+            format!("{consumer}-incidents"),
+        ];
+        match wanted.iter().find(|name| taken.contains(name)) {
+            Some(name) => Err(config_error(
+                API_SECTION,
+                format!(
+                    "chatops.notifications.durable_consumer gives the durable name `{name}`, \
+                     which the agent runtime (agents.bus_consumer) or the detection runner \
+                     (detection.runner.durable_name) has. Use a different name"
+                ),
+            )),
+            None => Ok(()),
+        }
+    }
+
+    /// Refuses the `[api]` section, because this build cannot read it.
+    ///
+    /// A caller that names `api` in `extra_sections` reads the section itself. The
+    /// function then does not examine it.
+    #[cfg(not(feature = "api"))]
+    fn api(config: &Config, extra_sections: &[String]) -> Result<ApiSection> {
+        if config.has_section(API_SECTION) && !extra_sections.iter().any(|name| name == API_SECTION)
+        {
+            return Err(config_error(
+                API_SECTION,
+                "the section needs the Cargo feature `api`, and this build does not have it",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Checks that this build and these settings can run the module `api`.
+    ///
+    /// The function does nothing if the module `api` is not in the module set.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Config`] in these conditions, if the module `api` is in the set:
+    ///
+    /// - The build does not have the Cargo feature `api`.
+    /// - The document has no `[api]` section. The operator API has no default principals
+    ///   and no open mode, so the section is necessary.
+    /// - No agent is enabled. The operator API shows and drives the agent runtime.
+    pub fn check_api_module(&self) -> Result<()> {
+        if !self.modules.contains(Module::Api) {
+            return Ok(());
+        }
+        #[cfg(not(feature = "api"))]
+        {
+            Err(config_error(
+                ModuleSet::SECTION,
+                "the module `api` needs the Cargo feature `api`, and this build does not have \
+                 it. Remove `api` from `enabled`, or use a build with the feature",
+            ))
+        }
+        #[cfg(feature = "api")]
+        {
+            if self.api.is_none() {
+                return Err(api_section_missing());
+            }
+            if self.agents.runtime.enabled_roles.is_empty() {
+                return Err(api_needs_agents());
+            }
+            Ok(())
+        }
+    }
+}
+
+/// The error for an operator API that has no `[api]` section.
+#[cfg(feature = "api")]
+pub(crate) fn api_section_missing() -> Error {
+    Error::Config(format!(
+        "the section `{API_SECTION}` is missing: the operator API needs it. The API has no \
+         default principal and no open mode. Add the section, or remove `api` from \
+         `modules.enabled`"
+    ))
+}
+
+/// The error for an operator API in a process that runs no agent.
+#[cfg(feature = "api")]
+pub(crate) fn api_needs_agents() -> Error {
+    config_error(
+        ModuleSet::SECTION,
+        "the module `api` needs the agent runtime, and no agent is enabled. Enable one agent \
+         module or more, for example `monitor`, or remove `api` from `enabled`",
+    )
 }
 
 /// Adds the name of a section to an error of a subsystem. The variant stays the same.
@@ -1262,6 +1424,200 @@ mod tests {
         assert_eq!(plugins.limits.require_sha256, Some(true));
         assert_eq!(plugins.limits.call_timeout_seconds, Some(5));
         assert_eq!(plugins.limits.max_memory_bytes, None);
+    }
+
+    /// An `[api]` section with one principal.
+    const API: &str = "[api]\nbind = \"127.0.0.1:8080\"\n\n[[api.principals]]\n\
+        id = \"alice@example.com\"\nroles = [\"approver\"]\ntoken_env = \"AEGIS_TOKEN_ALICE\"\n";
+
+    /// A module set with the module `api` and one agent.
+    const API_MODULES: &str =
+        "[modules]\nenabled = [\"ingest\", \"detection\", \"monitor\", \"api\"]\n";
+
+    #[cfg(feature = "api")]
+    #[test]
+    fn the_api_section_is_read_and_each_value_that_is_not_valid_names_the_section() {
+        assert!(read(MINIMAL).unwrap().api.is_none());
+        let api = read(&with(API)).unwrap().api.unwrap();
+        assert_eq!(api.bind.to_string(), "127.0.0.1:8080");
+        assert_eq!(api.principals.len(), 1);
+        assert_eq!(api.principals[0].id, "alice@example.com");
+        assert_eq!(api.principals[0].roles, ["approver"]);
+        assert_eq!(
+            api.principals[0].token_env.as_deref(),
+            Some("AEGIS_TOKEN_ALICE")
+        );
+
+        let message = config_message(&with("[api]\nopen = true\n"));
+        assert!(
+            message.starts_with("the section `api` is not valid:")
+                && message.contains("unknown field"),
+            "{message}"
+        );
+        assert_eq!(
+            config_message(&with("[api.limits]\nmax_page_size = 5000\n")),
+            "the section `api` is not valid: api.limits.max_page_size must be from 1 to 1000"
+        );
+        assert_eq!(
+            config_message(&with(&format!(
+                "{API}\n[[api.principals]]\nid = \"alice@example.com\"\n"
+            ))),
+            "the section `api` is not valid: api.principals[1]: two principals have the same id"
+        );
+
+        // The server has no TLS. An address that is not a loopback address needs the
+        // explicit switch.
+        let message = config_message(&with("[api]\nbind = \"0.0.0.0:8080\"\n"));
+        assert!(
+            message
+                .starts_with("the section `api` is not valid: api.bind is not a loopback address"),
+            "{message}"
+        );
+        let open = read(&with(
+            "[api]\nbind = \"0.0.0.0:8080\"\nallow_non_loopback = true\n",
+        ))
+        .unwrap();
+        assert_eq!(open.api.unwrap().bind.to_string(), "0.0.0.0:8080");
+    }
+
+    #[cfg(feature = "api")]
+    #[test]
+    fn the_notification_task_of_the_api_cannot_share_a_durable_name() {
+        let with_consumer = |name: &str, extra: &str| {
+            with(&format!(
+                "{API}\n[api.chatops.notifications]\ndurable_consumer = \"{name}\"\n{extra}"
+            ))
+        };
+        // The default name of the agent runtime is `aegis-agents`.
+        assert_eq!(
+            config_message(&with_consumer("aegis-agents", "")),
+            "the section `api` is not valid: chatops.notifications.durable_consumer gives the \
+             durable name `aegis-agents-incidents`, which the agent runtime \
+             (agents.bus_consumer) or the detection runner (detection.runner.durable_name) \
+             has. Use a different name"
+        );
+        let text = MINIMAL.replace(
+            "pack = \"detections/aegis-identity\"",
+            "pack = \"detections/aegis-identity\"\n\n[detection.runner]\n\
+             durable_name = \"soc-approvals\"",
+        ) + "\n"
+            + API
+            + "\n[api.chatops.notifications]\ndurable_consumer = \"soc\"\n";
+        let message = config_message(&text);
+        assert!(
+            message.starts_with(
+                "the section `api` is not valid: chatops.notifications.durable_consumer gives \
+                 the durable name `soc-approvals`"
+            ),
+            "{message}"
+        );
+
+        // A name of its own is valid, and so is the name of the agents when the agents use
+        // a different one.
+        let own = read(&with_consumer("aegis-chat", "")).unwrap();
+        assert_eq!(
+            own.api
+                .unwrap()
+                .chatops
+                .notifications
+                .durable_consumer
+                .as_deref(),
+            Some("aegis-chat")
+        );
+        assert!(
+            read(&with_consumer(
+                "aegis-agents",
+                "\n[agents]\nbus_consumer = \"soc-agents\"\n"
+            ))
+            .is_ok()
+        );
+    }
+
+    #[cfg(not(feature = "api"))]
+    #[test]
+    fn the_api_section_needs_its_cargo_feature() {
+        assert_eq!(
+            config_message(&with(API)),
+            "the section `api` is not valid: the section needs the Cargo feature `api`, and \
+             this build does not have it"
+        );
+    }
+
+    #[test]
+    fn a_component_that_reads_the_api_section_itself_keeps_it_from_the_settings() {
+        // The table has a key that the API configuration does not know.
+        let text = with(&format!(
+            "{API_MODULES}\n[api]\nlisten = \"127.0.0.1:8080\"\n"
+        ));
+        let config = Config::from_toml_str(&text).unwrap();
+        let base = Path::new("/etc/aegis");
+        assert!(matches!(
+            Settings::from_config(&config, base, &[]),
+            Err(Error::Config(message)) if message.starts_with("the section `api` is not valid:")
+        ));
+
+        let settings = Settings::from_config(&config, base, &["api".to_owned()]).unwrap();
+
+        assert!(settings.modules.contains(Module::Api));
+        #[cfg(feature = "api")]
+        assert!(settings.api.is_none());
+    }
+
+    #[cfg(feature = "api")]
+    #[test]
+    fn the_module_api_needs_the_api_section_and_an_agent() {
+        let message = |text: &str| match read(text).unwrap().check_api_module() {
+            Err(Error::Config(message)) => message,
+            other => panic!("expected a configuration error, found {other:?}"),
+        };
+        // The module is not in the set: the section is optional.
+        assert!(read(MINIMAL).unwrap().check_api_module().is_ok());
+        assert!(read(&with(API)).unwrap().check_api_module().is_ok());
+
+        assert!(
+            read(&with(&format!("{API_MODULES}\n{API}")))
+                .unwrap()
+                .check_api_module()
+                .is_ok()
+        );
+        assert_eq!(
+            message(&with(API_MODULES)),
+            "the section `api` is missing: the operator API needs it. The API has no default \
+             principal and no open mode. Add the section, or remove `api` from \
+             `modules.enabled`"
+        );
+        assert_eq!(
+            message(&with(&format!(
+                "[modules]\nenabled = [\"ingest\", \"detection\", \"api\"]\n\n{API}"
+            ))),
+            "the section `modules` is not valid: the module `api` needs the agent runtime, and \
+             no agent is enabled. Enable one agent module or more, for example `monitor`, or \
+             remove `api` from `enabled`"
+        );
+        // The operator removed each agent role: the process runs no agent.
+        assert!(
+            message(&with(&format!(
+                "{API_MODULES}\n{API}\n[agents]\nenabled_roles = []\n"
+            )))
+            .starts_with("the section `modules` is not valid: the module `api` needs the agent")
+        );
+    }
+
+    #[cfg(not(feature = "api"))]
+    #[test]
+    fn the_module_api_needs_its_cargo_feature() {
+        assert!(read(MINIMAL).unwrap().check_api_module().is_ok());
+        let error = read(&with(API_MODULES))
+            .unwrap()
+            .check_api_module()
+            .unwrap_err();
+        assert!(
+            matches!(&error, Error::Config(message)
+                if message == "the section `modules` is not valid: the module `api` needs the \
+                    Cargo feature `api`, and this build does not have it. Remove `api` from \
+                    `enabled`, or use a build with the feature"),
+            "{error:?}"
+        );
     }
 
     #[test]

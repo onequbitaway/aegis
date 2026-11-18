@@ -9,7 +9,11 @@ publish.workspace = true
 build = "build.rs"
 
 [features]
-default = ["postgres", "plugins", "otlp"]
+default = ["postgres", "plugins", "otlp", "api"]
+# The operator API: the `[api]` section and the module `aegis_app::api` (`aegis-api`).
+api = ["dep:aegis-api", "tokio/net", "tokio-util/rt"]
+# The gRPC services of the operator API.
+grpc = ["api", "aegis-api/grpc"]
 # PostgreSQL storage: `storage.kind = "postgres"` and `audit.kind = "postgres"`.
 postgres = ["dep:aegis-storage"]
 # WebAssembly connector plugins: the `[plugins]` section.
@@ -21,6 +25,7 @@ docker-tests = ["postgres"]
 
 [dependencies]
 aegis-agents.workspace = true
+aegis-api = { workspace = true, optional = true }
 aegis-bus.workspace = true
 aegis-contracts.workspace = true
 aegis-core.workspace = true
@@ -43,6 +48,11 @@ tracing.workspace = true
 
 [dev-dependencies]
 aegis-testkit.workspace = true
+# The gRPC test of the operator API encodes its messages with `prost`.
+prost = "0.14.5"
+# The tests of the operator API send HTTP requests to a loopback address. gRPC with no
+# TLS needs HTTP/2.
+reqwest = { version = "0.13.5", default-features = false, features = ["http2", "json"] }
 tempfile = "3.27.0"
 tokio = { workspace = true, features = ["test-util"] }
 uuid.workspace = true

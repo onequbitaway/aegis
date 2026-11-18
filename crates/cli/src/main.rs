@@ -2,7 +2,7 @@
 //!
 //! | Command | Function |
 //! | --- | --- |
-//! | `aegis run --config <file>` | Runs the service until SIGINT or SIGTERM. |
+//! | `aegis run --config <file>` | Runs the service until SIGINT or SIGTERM. With the module `api`, it also runs the operator API. |
 //! | `aegis init --dir <dir>` | Writes a working starter directory. |
 //! | `aegis demo [--dir <dir>]` | Replays the recorded attack log in a new starter directory. |
 //! | `aegis replay --config <file> --events <jsonl>` | Examines an event file and prints the report. |
@@ -46,7 +46,8 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Run the service until SIGINT or SIGTERM.
+    /// Run the service until SIGINT or SIGTERM. With `api` in `[modules]`, the command
+    /// also runs the operator API: the REST API, the web console, and ChatOps.
     Run {
         /// The configuration file. A relative path in it starts at its directory.
         #[arg(long)]

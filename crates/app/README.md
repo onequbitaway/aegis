@@ -14,6 +14,7 @@ system that the operator does not own.
 - [Use the crate](#use-the-crate)
 - [The two run modes](#the-two-run-modes)
 - [The connections between the subsystems](#the-connections-between-the-subsystems)
+- [The operator API](#the-operator-api)
 - [Configuration](#configuration)
 - [Safe defaults](#safe-defaults)
 - [Cargo features](#cargo-features)
@@ -35,6 +36,10 @@ system that the operator does not own.
 | `App::close()` | Closes the database connections. |
 | `preflight(&Config, base_dir, extra_sections)` | Returns all problems of a configuration. Opens no connection and writes no file. |
 | `settings::Settings` | The sections of the configuration document. `Settings::read` returns all problems. |
+| `Settings::check_api_module()` | Checks that the build and the settings can run the module `api`. |
+| `api::service(&app)` | Makes the `Service` of the operator API for `run_with`. Cargo feature `api`. |
+| `api::OperatorApi`, `api::BoundApi` | The operator API of one application, before and after it has a listener. |
+| `api::AppApprovals` | The approval path of the API: an `aegis_api::ApprovalActions` that calls the application. |
 | `starter::write(dir)`, `starter::attack_events()` | The starter directory and the recorded attack log. The crate embeds them at compile time. |
 | `incidents::SharedIncidents` | The incident store for the detection engine and the agents. |
 | `actions::ActionJournal`, `actions::ActionRecord` | The single dispatcher of the process, with a journal of its requests. |
@@ -56,7 +61,7 @@ system that the operator does not own.
 | Option | Effect |
 | --- | --- |
 | `base_dir(dir)` | The directory that relative paths of the configuration start at. |
-| `allow_section(name)` | Permits a section that a different component reads, for example `api`. |
+| `allow_section(name)` | Permits a section that a different component reads. With `api`, the application does not read `[api]`. |
 | `modules(set)` | Replaces the module set of the configuration. |
 | `model(provider)` | Replaces the model of the configuration. |
 | `action_connector(connector)` | Adds an action connector. It has priority over the configured connectors. |
@@ -99,6 +104,7 @@ app.close().await;
 | `detection` | The bus runner of the detection engine, with the bridges. |
 | `monitor`, `hunter`, `analyst`, `responder`, `deception`, `reporter` | The agent runtime. It reads incidents and tasks from the bus. |
 | `responder` | The playbook worker, if `response.playbooks` is not `off`. |
+| `api` | The operator API. `run_with` gets its `Service` from `api::service`. |
 
 - At the start, `run` writes one `config_change` audit record and gives the goal of the
   operator to the Supervisor agent.
@@ -106,8 +112,9 @@ app.close().await;
 - If one component fails, `run` stops all components and returns the error of the component
   that failed first. The shutdown signal of the caller stays as it is.
 - One run or one replay is possible at a time. A second call is `Error::InvalidInput`.
-- The module `api` has no component in this crate. Give `run_with` a `Service` for the
-  module. Without that service, a module set with `api` is `Error::Config`.
+- The module `api` needs a `Service` in the options of `run_with`. Make it with
+  `api::service(&app)`. Without that service, a module set with `api` is `Error::Config`.
+  Refer to [The operator API](#the-operator-api).
 
 `RunOptions::stop_when_sources_end` stops the run when all sources are at their end and the
 detection engine completed their events. Use it for a session on recorded events.
@@ -187,14 +194,116 @@ playbook run.
 `HoneytokenTripDetector` of the detection engine use one `HoneytokenRegistry`.
 
 **Durable names.** Each bus subscriber has its own durable name: the detection runner
-(`detection.runner.durable_name`), and the two subscriptions of the agent runtime
-(`agents.bus_consumer` with `-tasks` and `-incidents`). A configuration that gives two of
-them one name is an error. The bridges use no subscription.
+(`detection.runner.durable_name`), the two subscriptions of the agent runtime
+(`agents.bus_consumer` with `-tasks` and `-incidents`), and the two subscriptions of the
+notification task of the operator API (`api.chatops.notifications.durable_consumer` with
+`-approvals` and `-incidents`). A configuration that gives two of them one name is an
+error. The bridges and the live feed of the API use no durable name.
 
 **Simulation connector.** A dispatcher needs a connector also for a dry run. With
 `response.dry_run = true`, the action registry gets the `simulation` connector last. It
 reports what a dry run would do for an action type that has no configured connector. It
 refuses each request that is not a dry run.
+
+## The operator API
+
+The module `api` (Cargo feature `api`) joins `aegis-api` to the services of the
+application: the REST API, the web console, ChatOps, and, with the Cargo feature `grpc`,
+the gRPC services. Refer to the README of `aegis-api` for the routes and for the keys of
+the `[api]` section.
+
+```rust,no_run
+# #[cfg(feature = "api")]
+# async fn example() -> aegis_contracts::Result<()> {
+use std::sync::Arc;
+
+use aegis_app::{App, RunOptions, api};
+use aegis_core::{Config, Shutdown};
+
+let config = Config::load_with_env("aegis.toml")?;
+let app = Arc::new(App::build(&config).await?);
+
+let shutdown = Shutdown::new();
+shutdown.listen_for_signals()?;
+let options = RunOptions {
+    stop_when_sources_end: false,
+    // The function reads the secrets and opens the listener on `api.bind`.
+    services: vec![api::service(&app).await?],
+};
+app.run_with(shutdown, options).await?;
+# Ok(())
+# }
+```
+
+The server runs as one component of `run_with`. It stops on the shutdown signal of the
+run. If the server fails, the run stops all components and returns the error.
+
+### The services of the API
+
+| Part of `aegis_api::ApiParts` | Service of the application |
+| --- | --- |
+| `incidents`, `graph`, `audit`, `approvals`, `bus` | `App::incidents`, `graph`, `audit`, `approvals`, `bus` |
+| `rbac` | The `[rbac]` section. The roles of an API principal are roles of this section. |
+| `agents` | `App::agents` |
+| `playbooks` | A copy of the active playbooks. Refer to [Playbooks through the API](#playbooks-through-the-api). |
+| `approval_actions` | `api::AppApprovals` |
+| `modules` | `App::modules` |
+
+### Rules at the start
+
+The API fails closed. Each of these conditions is an `Error::Config` before the server
+starts. `Settings::check_api_module`, `preflight`, and `api::OperatorApi` check them.
+
+- The module `api` is in the module set, and the build does not have the Cargo feature
+  `api`.
+- The configuration has no `[api]` section. The API has no default principal and no open
+  mode.
+- A value of the `[api]` section is not valid. For example, the address is not a loopback
+  address, and `allow_non_loopback` is not `true`.
+- `api.chatops.notifications.durable_consumer` gives a durable name that the agent runtime
+  or the detection runner has. Each bus subscriber has its own durable name.
+- An environment variable that the section names is not set, or its token is not usable.
+  `OperatorApi::check` reads the secrets. The message names the variable and never shows a
+  secret.
+- The process runs no agent. The API shows and drives the agent runtime, so a module set
+  with `api` needs one agent module or more, for example `monitor`.
+
+`OperatorApi::bind` opens the listener before the run starts. An address that is in use is
+thus an `Error::Unavailable` before the application starts its sources.
+
+### Decisions through the API
+
+A decision from REST, the console, Slack, Teams, or gRPC goes to `api::AppApprovals`. It
+does the steps of `App::decide_approval`: the approval service checks the permission and
+the approval rules, writes the audit record, and records the decision. For an approval,
+the dispatcher runs the action one time, and the agent that proposed the action gets the
+result.
+
+- **The steps run in a task of their own.** The API has a time limit for each request, and
+  a client can close its connection. The task completes also when the request is gone, so
+  a decision is never half-applied. The audit log and the incident have the result.
+- **After the record of the decision, the answer is the decided request.** If the approved
+  action does not run, the answer has a disposition with the status `failed` and the
+  cause. The API does not answer with an error for a decision that took effect. One
+  approval permits one attempt.
+- **The shutdown waits.** The server stops only when each decision that started is
+  complete. The time limit of one connector call is `response.execution_timeout_seconds`.
+
+### Playbooks through the API
+
+`response.playbooks` is the limit for a playbook that a principal starts through the API:
+
+| `response.playbooks` | The API |
+| --- | --- |
+| `off` | Has no playbook. A run is a 404. |
+| `dry_run` | Lists the playbooks. Each run is a dry run, also when the request asks for `live`. |
+| `live` | Lists the playbooks. The request selects `dry_run` or `live`. |
+
+- `response.dry_run` makes each action a dry run in all three modes.
+- Each action of a run goes through the dispatcher in a task of its own. A request that
+  goes away stops the playbook between two actions, never in the middle of one.
+- A run through the API does not use the rule "one playbook runs one time for one
+  incident". The principal selects the playbook and the incident.
 
 ## Configuration
 
@@ -218,6 +327,7 @@ type of its section. Refer to the README of that crate for the keys.
 | `[[sources]]` | A list of `aegis_ingest::SourceConfig` | No |
 | `[ingest]` | `checkpoint_dir` and `retry` (`aegis_ingest::RetryPolicy`) | No |
 | `[plugins]` | `dir` and `limits` | No |
+| `[api]` | `aegis_api::ApiConfig` | Only with the module `api` |
 
 A section name that is not in this table is an error. Each section rejects a key that it
 does not know. A section that is missing or not valid is an `Error::Config` that names the
@@ -297,7 +407,10 @@ name = "replay"
 path = "events.jsonl"
 ```
 
-`starter::CONFIG` is a full starter configuration with comments.
+`starter::CONFIG` is a full starter configuration with comments. It has the `[api]`
+section as a comment: the bind address and one principal with the name of its token
+variable. The roles of that principal are roles of the `[rbac.roles]` table of the same
+file.
 
 ## Safe defaults
 
@@ -309,6 +422,8 @@ path = "events.jsonl"
   detection engine does not run.
 - With the default policy, a dry run is permitted and a gated action needs the approval of
   a person.
+- With no `api` in `[modules]`, the process opens no listener. The starter configuration
+  does not have the module.
 
 ## Cargo features
 
@@ -317,11 +432,14 @@ path = "events.jsonl"
 | `postgres` | `storage.kind = "postgres"` and `audit.kind = "postgres"` (`aegis-storage`). The build runs the migrations. |
 | `plugins` | The `[plugins]` section (`aegis-plugin`). |
 | `otlp` | The OpenTelemetry trace exporter of `aegis-core`. |
+| `api` | The `[api]` section and the module `api` of this crate (`aegis-api`). |
+| `grpc` | The gRPC services of the operator API. It includes `api`. It is not a default feature. |
 | `docker-tests` | The tests that need Docker. |
 
-`postgres`, `plugins`, and `otlp` are default features. With `--no-default-features`, the
-crate builds a light process for monitoring. A section that needs a feature that the build
-does not have is an `Error::Config`.
+`postgres`, `plugins`, `otlp`, and `api` are default features. With
+`--no-default-features`, the crate builds a light process for monitoring, with no HTTP
+server. A section or a module that needs a feature that the build does not have is an
+`Error::Config`.
 
 ## Test the crate
 
@@ -334,7 +452,8 @@ cargo test -p aegis-app --all-features
 ```
 
 The tests use no network outside the loopback address and no credentials. The model server
-and the webhook receiver are `wiremock` servers.
+and the webhook receiver are `wiremock` servers. The tests of the operator API give the
+tokens through `OperatorApi::with_env`. They do not change the environment of the process.
 
 | Test file | Subject |
 | --- | --- |
@@ -343,9 +462,10 @@ and the webhook receiver are `wiremock` servers.
 | `tests/approval.rs` | A gated action: approval, rejection, permissions, the webhook connector, a connector failure. |
 | `tests/bridges.rs` | The state of an incident stays, closed incidents, events to the Monitor, the audit feed, action results, honeytokens. |
 | `tests/service.rs` | `App::run` with a file source on the in-process bus, a monitoring session, a failed component. |
+| `tests/api.rs` | The operator API of the running application on a loopback port: the tokens, the approval path, a request that goes away, the playbook modes, the live feed, the console, and the shutdown. |
 | `tests/build.rs` | The build from a configuration, the builder options, and the reload. |
 | `tests/plugins.rs` | The example plugins of the repository in the two registries. This test builds the plugins. |
-| `tests/docker.rs` | A replay and a service run with PostgreSQL storage, the PostgreSQL audit log, and a NATS bus. |
+| `tests/docker.rs` | A replay and a service run with PostgreSQL storage, the PostgreSQL audit log, and a NATS bus. The operator API then reads the same database and the same bus. |
 
 The feature `docker-tests` needs Docker. `tests/docker.rs` builds the image
 `aegis-int-postgres:test` from `deploy/docker/postgres`, and starts one PostgreSQL
@@ -370,6 +490,15 @@ starts with `aegis-int-`. The test removes the containers.
   the error, and the new rule pack, policy, and playbooks are active.
 - The action journal keeps the last 10,000 requests in memory. The audit log is the durable
   record.
+- The operator API needs the agent runtime. A process with no agent module cannot have
+  the module `api`.
+- The operator API has the playbook set of the time when `api::OperatorApi::new` ran. After
+  `App::reload`, the API lists and runs the old set until the process starts again. The
+  command-line program does not call `reload`.
+- A principal cannot start a decision again through the API when its approved action did
+  not run. The request then has a decision, and the API refuses a second one.
+- When the shutdown waits for a decision, the agent runtime is possibly stopped. The
+  result task of that decision then stays in the queue of the agents.
 - `App::build` connects to the bus and to the database, runs the migrations, and opens the
   audit log. One process writes one audit file, so a second build with the same audit file
   is `Error::Unavailable` while the first application lives.

@@ -12,6 +12,7 @@
 //! | [`App::decide_approval`] | The decision of a person on a gated action. |
 //! | [`App::reload`] | A new load of the rule pack, the policy, and the playbooks. |
 //! | [`preflight`] | All problems of a configuration, with no connection and no file write. |
+//! | `api` | The operator API of the application: REST, the web console, and ChatOps. Cargo feature `api`. |
 //! | [`settings`] | The sections of the configuration document. |
 //! | [`starter`] | The starter directory and the recorded attack log, embedded in the crate. |
 //!
@@ -30,6 +31,9 @@
 //!   on `aegis.audit`.
 //! - **Honeytokens.** The honeytoken connector and the honeytoken detector use one
 //!   registry.
+//! - **Operator API.** With the Cargo feature `api`, the module `api` gives the services
+//!   of the application to `aegis-api`. A decision of a person through the API runs the
+//!   approved action one time, also when the HTTP request goes away.
 //!
 //! # Safe defaults
 //!
@@ -64,12 +68,16 @@
 //! | `postgres` | `storage.kind = "postgres"` and `audit.kind = "postgres"`. |
 //! | `plugins` | The `[plugins]` section: WebAssembly connector plugins. |
 //! | `otlp` | The OpenTelemetry trace exporter of `aegis-core`. |
+//! | `api` | The `[api]` section and the module `api`: the operator API. |
+//! | `grpc` | The gRPC services of the operator API. Not a default feature. |
 //!
-//! All three are default features. Without them, the crate builds a light process for
-//! monitoring with the in-memory storage.
+//! `postgres`, `plugins`, `otlp`, and `api` are default features. Without them, the crate
+//! builds a light process for monitoring with the in-memory storage and no HTTP server.
 
 pub mod actions;
 pub mod activity;
+#[cfg(feature = "api")]
+pub mod api;
 mod app;
 pub mod audit;
 mod bridge;

@@ -13,7 +13,7 @@ use aegis_policy::RegoPolicyEngine;
 use async_trait::async_trait;
 
 use crate::playbooks::Playbooks;
-use crate::settings::{PlaybookMode, Settings, section_error};
+use crate::settings::{API_SECTION, PlaybookMode, Settings, section_error};
 
 /// A dispatcher for a playbook engine that only reads playbook files. It runs no action.
 struct NoDispatcher;
@@ -31,11 +31,13 @@ impl ActionDispatcher for NoDispatcher {
 /// Reads the configuration and the files that it names, and returns all problems.
 ///
 /// The function reads each section, the rule pack, the policy, the playbooks, the model
-/// settings, and the source settings. It does not stop at the first problem. It opens no
-/// connection, and it writes no file.
+/// settings, and the source settings. It also checks the rules of the module `api`
+/// ([`Settings::check_api_module`]), unless `extra_sections` names `api`. It does not stop
+/// at the first problem. It opens no connection, and it writes no file.
 ///
 /// An empty result means that these parts are valid. [`App::build`](crate::App::build)
 /// then finds the problems that need a connection, for example a bus that does not answer.
+/// The function does not read the secrets of the operator API.
 ///
 /// # Errors
 ///
@@ -88,6 +90,13 @@ pub async fn preflight(config: &Config, base_dir: &Path, extra_sections: &[Strin
 
     if let Err(error) = SourceRegistry::from_configs(&settings.sources) {
         problems.push(section_error("sources", error));
+    }
+
+    // A caller that reads the `[api]` section itself also supplies the operator API.
+    if !extra_sections.iter().any(|name| name == API_SECTION)
+        && let Err(error) = settings.check_api_module()
+    {
+        problems.push(error);
     }
     problems
 }
@@ -166,6 +175,41 @@ mod tests {
             "{}",
             problems[3]
         );
+    }
+
+    #[tokio::test]
+    async fn the_rules_of_the_module_api_are_problems() {
+        let directory = tempfile::tempdir().unwrap();
+        starter::write(directory.path()).unwrap();
+        let text = std::fs::read_to_string(directory.path().join(starter::CONFIG_FILE)).unwrap();
+        assert_eq!(text.matches("\"reporter\"]").count(), 1);
+        let config =
+            Config::from_toml_str(&text.replace("\"reporter\"]", "\"reporter\", \"api\"]"))
+                .unwrap();
+
+        let problems = messages(&preflight(&config, directory.path(), &[]).await);
+
+        // The starter configuration has no `[api]` section.
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        #[cfg(feature = "api")]
+        assert!(
+            problems[0].starts_with("the section `api` is missing:"),
+            "{}",
+            problems[0]
+        );
+        #[cfg(not(feature = "api"))]
+        assert!(
+            problems[0].starts_with(
+                "the section `modules` is not valid: the module `api` needs the Cargo feature \
+                 `api`"
+            ),
+            "{}",
+            problems[0]
+        );
+
+        // A caller that reads the `[api]` section itself supplies the operator API.
+        let problems = preflight(&config, directory.path(), &["api".to_owned()]).await;
+        assert_eq!(messages(&problems), Vec::<String>::new());
     }
 
     #[tokio::test]

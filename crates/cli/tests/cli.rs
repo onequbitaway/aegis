@@ -24,22 +24,34 @@ fn aegis(directory: &Path, arguments: &[&str]) -> Output {
 /// Runs the program as [`aegis`] does. With `temp`, the program makes its temporary
 /// files in that directory, so that the test removes them.
 fn aegis_with_temp(directory: &Path, arguments: &[&str], temp: Option<&Path>) -> Output {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_aegis"));
+    let mut command = program(directory, arguments);
     if let Some(temp) = temp {
         command.env("TMPDIR", temp);
     }
+    command.output().unwrap()
+}
+
+/// Makes the command for the program with `arguments`.
+///
+/// The program gets no `AEGIS__` variable and no API token of the test environment, and
+/// its working directory is `directory`.
+fn program(directory: &Path, arguments: &[&str]) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_aegis"));
     for (name, _) in std::env::vars_os() {
-        if name.to_string_lossy().to_uppercase().starts_with("AEGIS__") {
+        let name_text = name.to_string_lossy().to_uppercase();
+        if name_text.starts_with("AEGIS__") || name_text == API_TOKEN_VARIABLE {
             command.env_remove(name);
         }
     }
     command
         .args(arguments)
         .current_dir(directory)
-        .stdin(Stdio::null())
-        .output()
-        .unwrap()
+        .stdin(Stdio::null());
+    command
 }
+
+/// The variable that the `[api]` example of the starter configuration names.
+const API_TOKEN_VARIABLE: &str = "AEGIS_TOKEN_ALICE";
 
 fn stdout(output: &Output) -> String {
     String::from_utf8(output.stdout.clone()).unwrap()
@@ -823,4 +835,366 @@ fn a_command_line_that_is_not_valid_exits_with_a_usage_error() {
         "{}",
         stderr(&no_config)
     );
+}
+
+/// Adds `api` to the module set of the starter configuration.
+fn with_api_module(text: &str) -> String {
+    assert_eq!(text.matches("\"reporter\"]").count(), 1);
+    text.replace("\"reporter\"]", "\"reporter\", \"api\"]")
+}
+
+/// Removes the comment mark from the `[api]` example of the starter configuration, and
+/// adds `api` to the module set.
+#[cfg(feature = "api")]
+fn with_api_example(text: &str) -> String {
+    let (before, example) = text.split_once("# [api]\n").unwrap();
+    let mut text = format!("{before}[api]\n");
+    for line in example.lines() {
+        let line = line
+            .strip_prefix("# ")
+            .or_else(|| line.strip_prefix('#'))
+            .expect("each line of the example is a comment");
+        text.push_str(line);
+        text.push('\n');
+    }
+    with_api_module(&text)
+}
+
+#[cfg(feature = "api")]
+#[test]
+fn config_check_reports_each_problem_of_the_api_section_and_names_the_section() {
+    let (directory, starter) = init();
+    let config = starter.join("aegis.toml");
+    let good = std::fs::read_to_string(&config).unwrap();
+    let check = |arguments: &[&str]| {
+        let mut all = vec!["config", "check", "--config", text(&config)];
+        all.extend_from_slice(arguments);
+        aegis(directory.path(), &all)
+    };
+
+    // A value that is out of range.
+    std::fs::write(
+        &config,
+        format!("{good}\n[api]\nbind = \"127.0.0.1:8080\"\n\n[api.limits]\nmax_page_size = 5000\n"),
+    )
+    .unwrap();
+    let problem = "configuration error: the section `api` is not valid: \
+                   api.limits.max_page_size must be from 1 to 1000";
+    let output = check(&[]);
+    assert_failure(&output);
+    assert_eq!(
+        stdout(&output),
+        format!(
+            "The configuration {} has 1 problems:\n  1. {problem}\n",
+            config.display()
+        )
+    );
+    assert!(
+        stderr(&output).contains("the section `api` is not valid:"),
+        "{}",
+        stderr(&output)
+    );
+    let json = check(&["--format", "json"]);
+    assert_failure(&json);
+    let value: Value = serde_json::from_str(&stdout(&json)).unwrap();
+    assert_eq!(value["valid"], false);
+    assert_eq!(value["problems"], serde_json::json!([problem]));
+    // `run` fails in the same way and starts nothing.
+    let run = aegis(directory.path(), &["run", "--config", text(&config)]);
+    assert_failure(&run);
+    assert_eq!(stdout(&run), "");
+    assert!(
+        stderr(&run).contains("the section `api` is not valid:"),
+        "{}",
+        stderr(&run)
+    );
+    assert!(!starter.join("data/audit.jsonl").exists());
+
+    // A key that the section does not know.
+    std::fs::write(&config, format!("{good}\n[api]\nopen = true\n")).unwrap();
+    let output = check(&[]);
+    assert_failure(&output);
+    assert!(
+        stdout(&output).contains("\n  1. configuration error: the section `api` is not valid:"),
+        "{}",
+        stdout(&output)
+    );
+
+    // The module `api` with no `[api]` section.
+    std::fs::write(&config, with_api_module(&good)).unwrap();
+    let output = check(&[]);
+    assert_failure(&output);
+    assert!(
+        stdout(&output).contains("\n  1. configuration error: the section `api` is missing:"),
+        "{}",
+        stdout(&output)
+    );
+
+    // The example of the starter configuration, with no token in the environment. The
+    // problem names the section and the variable.
+    std::fs::write(&config, with_api_example(&good)).unwrap();
+    let output = check(&[]);
+    assert_failure(&output);
+    assert_eq!(
+        stdout(&output),
+        format!(
+            "The configuration {} has 1 problems:\n  1. configuration error: the section `api` \
+             is not valid: principal alice@example.com: the environment variable \
+             {API_TOKEN_VARIABLE} is not set\n",
+            config.display()
+        )
+    );
+
+    // With the token, the configuration is valid. The check shows the address.
+    let token = "a-token-of-the-test-0123456789abcdef";
+    let output = program(
+        directory.path(),
+        &[
+            "config",
+            "check",
+            "--config",
+            text(&config),
+            "--format",
+            "json",
+        ],
+    )
+    .env(API_TOKEN_VARIABLE, token)
+    .output()
+    .unwrap();
+    assert_success(&output);
+    let value: Value = serde_json::from_str(&stdout(&output)).unwrap();
+    assert_eq!(value["valid"], true);
+    assert_eq!(value["summary"]["api"], "127.0.0.1:8080");
+    assert!(!stdout(&output).contains(token) && !stderr(&output).contains(token));
+
+    // The starter configuration starts no API.
+    std::fs::write(&config, &good).unwrap();
+    let json = check(&["--format", "json"]);
+    assert_success(&json);
+    let value: Value = serde_json::from_str(&stdout(&json)).unwrap();
+    assert_eq!(value["summary"]["api"], "off");
+}
+
+#[cfg(not(feature = "api"))]
+#[test]
+fn a_build_without_the_api_feature_refuses_the_module_and_the_section() {
+    let (directory, starter) = init();
+    let config = starter.join("aegis.toml");
+    let good = std::fs::read_to_string(&config).unwrap();
+
+    // The module `api`.
+    std::fs::write(&config, with_api_module(&good)).unwrap();
+    let problem = "configuration error: the section `modules` is not valid: the module `api` \
+                   needs the Cargo feature `api`, and this build does not have it.";
+    let check = aegis(
+        directory.path(),
+        &["config", "check", "--config", text(&config)],
+    );
+    assert_failure(&check);
+    assert!(
+        stdout(&check).contains(&format!("\n  1. {problem}")),
+        "{}",
+        stdout(&check)
+    );
+    let run = aegis(directory.path(), &["run", "--config", text(&config)]);
+    assert_failure(&run);
+    assert_eq!(stdout(&run), "");
+    assert!(
+        stderr(&run).starts_with(&format!("error: {problem}")),
+        "{}",
+        stderr(&run)
+    );
+
+    // The `[api]` section.
+    std::fs::write(
+        &config,
+        format!("{good}\n[api]\nbind = \"127.0.0.1:8080\"\n"),
+    )
+    .unwrap();
+    let check = aegis(
+        directory.path(),
+        &["config", "check", "--config", text(&config)],
+    );
+    assert_failure(&check);
+    assert!(
+        stdout(&check).contains(
+            "\n  1. configuration error: the section `api` is not valid: the section needs the \
+             Cargo feature `api`, and this build does not have it"
+        ),
+        "{}",
+        stdout(&check)
+    );
+}
+
+/// Sends one GET request to the server at `address`. Returns the status and the body.
+#[cfg(all(unix, feature = "api"))]
+fn http_get(address: std::net::SocketAddr, path: &str, token: Option<&str>) -> (u16, String) {
+    use std::io::{Read as _, Write as _};
+
+    let mut stream = std::net::TcpStream::connect(address).unwrap();
+    stream.set_read_timeout(Some(LIMIT)).unwrap();
+    let authorization = token
+        .map(|token| format!("Authorization: Bearer {token}\r\n"))
+        .unwrap_or_default();
+    write!(
+        stream,
+        "GET {path} HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\n{authorization}\r\n"
+    )
+    .unwrap();
+    let mut response = String::new();
+    stream.read_to_string(&mut response).unwrap();
+    let (head, body) = response.split_once("\r\n\r\n").unwrap();
+    let status = head.split_whitespace().nth(1).unwrap().parse().unwrap();
+    (status, body.to_owned())
+}
+
+/// The time limit for one step of a test that talks to the running program.
+#[cfg(all(unix, feature = "api"))]
+const LIMIT: std::time::Duration = std::time::Duration::from_secs(60);
+
+#[cfg(all(unix, feature = "api"))]
+#[test]
+fn run_serves_the_operator_api_until_a_stop_signal() {
+    use std::io::BufRead as _;
+    use std::sync::mpsc;
+
+    let (directory, starter) = init();
+    let config = starter.join("aegis.toml");
+    let good = std::fs::read_to_string(&config).unwrap();
+    // The operating system selects the port. The log is JSON, so that the test can read
+    // the address from it.
+    let changed = with_api_example(&good)
+        .replace("bind = \"127.0.0.1:8080\"", "bind = \"127.0.0.1:0\"")
+        .replace("log_format = \"text\"", "log_format = \"json\"")
+        .replace("log_level = \"warn\"", "log_level = \"info\"");
+    assert!(changed.contains("bind = \"127.0.0.1:0\""));
+    assert!(changed.contains("log_format = \"json\"") && changed.contains("log_level = \"info\""));
+    std::fs::write(&config, changed).unwrap();
+    let token = "a-token-of-the-test-0123456789abcdef";
+
+    let mut child = program(
+        directory.path(),
+        &["run", "--config", text(&config), "--format", "json"],
+    )
+    .env(API_TOKEN_VARIABLE, token)
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    .spawn()
+    .unwrap();
+    let process = child.id().to_string();
+    let signal = |name: &str| {
+        Command::new("kill")
+            .args([name, &process])
+            .status()
+            .unwrap()
+            .success()
+    };
+
+    // The first log record with an address is the address of the server.
+    let log = std::io::BufReader::new(child.stderr.take().unwrap());
+    let (lines, received) = mpsc::channel::<String>();
+    let reader = std::thread::spawn(move || {
+        for line in log.lines().map_while(Result::ok) {
+            if lines.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    let mut seen = Vec::new();
+    let address = loop {
+        let line = match received.recv_timeout(LIMIT) {
+            Ok(line) => line,
+            Err(error) => {
+                signal("-KILL");
+                panic!("the program did not log the address of the API ({error}): {seen:?}");
+            }
+        };
+        let address = serde_json::from_str::<Value>(&line)
+            .ok()
+            .and_then(|record| record["fields"]["address"].as_str().map(str::to_owned))
+            .and_then(|address| address.parse::<std::net::SocketAddr>().ok());
+        seen.push(line);
+        if let Some(address) = address {
+            break address;
+        }
+    };
+    assert!(address.ip().is_loopback());
+    assert_ne!(address.port(), 0);
+
+    // The server answers: the health route, the console, and the REST API with a token.
+    let (status, body) = http_get(address, "/healthz", None);
+    assert_eq!(status, 200);
+    assert_eq!(
+        serde_json::from_str::<Value>(&body).unwrap(),
+        serde_json::json!({ "status": "ok" })
+    );
+    let (status, page) = http_get(address, "/", None);
+    assert_eq!(status, 200);
+    assert!(page.starts_with("<!doctype html>"), "{page}");
+    let (status, body) = http_get(address, "/api/v1/session", Some(token));
+    assert_eq!(status, 200);
+    let session: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(session["principal"]["id"], "alice@example.com");
+    assert_eq!(
+        session["permissions"],
+        serde_json::json!(["view_incidents", "view_audit", "approve_actions"])
+    );
+    let (status, body) = http_get(address, "/api/v1/status", Some(token));
+    assert_eq!(status, 200);
+    let modules = serde_json::from_str::<Value>(&body).unwrap()["modules"].clone();
+    assert!(
+        modules
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("api")),
+        "{modules}"
+    );
+    let (status, _) = http_get(address, "/api/v1/session", None);
+    assert_eq!(status, 401);
+    let (status, _) = http_get(
+        address,
+        "/api/v1/session",
+        Some("not-the-token-0123456789abcdef012345"),
+    );
+    assert_eq!(status, 401);
+
+    // SIGTERM stops the server and the application. The exit status is 0.
+    assert!(signal("-TERM"));
+    let (done, exited) = mpsc::channel();
+    let waiter = std::thread::spawn(move || {
+        // The receiver is gone only if the test failed before.
+        let _ = done.send(child.wait_with_output());
+    });
+    let output = match exited.recv_timeout(LIMIT) {
+        Ok(output) => output.unwrap(),
+        Err(error) => {
+            signal("-KILL");
+            panic!("the program did not stop after SIGTERM ({error})");
+        }
+    };
+    waiter.join().unwrap();
+    reader.join().unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{:?}",
+        received.try_iter().collect::<Vec<_>>()
+    );
+    let summary: Value = serde_json::from_str(&stdout(&output)).unwrap();
+    assert_eq!(summary["progress"]["events_processed"], 0);
+    assert_eq!(summary["sources"], serde_json::json!([]));
+    // The server does not listen after the program stopped.
+    let refused = std::net::TcpStream::connect(address).unwrap_err();
+    assert_eq!(refused.kind(), std::io::ErrorKind::ConnectionRefused);
+    // The audit log of the run verifies.
+    let verify = aegis(
+        directory.path(),
+        &[
+            "audit",
+            "verify",
+            "--path",
+            text(&starter.join("data/audit.jsonl")),
+        ],
+    );
+    assert_success(&verify);
 }

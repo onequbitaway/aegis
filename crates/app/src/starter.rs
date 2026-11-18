@@ -44,6 +44,7 @@ pub const CONFIG: &str = r#"# The AEGIS starter configuration.
 
 [modules]
 # The subsystems that the process runs. Remove "responder" to only monitor.
+# Add "api" to start the operator API. It needs the [api] section at the end of this file.
 enabled = ["ingest", "detection", "monitor", "hunter", "analyst", "responder", "deception", "reporter"]
 
 [telemetry]
@@ -69,6 +70,8 @@ path = "data/audit.jsonl"
 # You own this policy. Change it to fit your environment.
 paths = ["policies/default.rego"]
 
+# The permissions of each role. A principal of the operator API gets its permissions
+# from the roles that it names. No permission includes a different permission.
 [rbac.roles]
 analyst = ["view_incidents", "view_audit"]
 approver = ["view_incidents", "approve_actions"]
@@ -114,6 +117,23 @@ checkpoint_dir = "data/checkpoints"
 #
 # [model.routes]
 # default = [{ provider = "local" }]
+
+# The operator API: the REST API, the web console at "/", and ChatOps.
+# To start it, add "api" to `enabled` in [modules], and remove the comment mark from the
+# lines of the [api] section below.
+#   - The server has no TLS. Keep a loopback address, or put a proxy with TLS before the
+#     server and set `allow_non_loopback = true`.
+#   - Each request needs the bearer token of one principal. There is no open mode.
+#   - `roles` are names of [rbac.roles].
+#   - `token_env` is the NAME of the environment variable that holds the token. The
+#     token has 32 characters or more. Make one with: openssl rand -hex 32
+# [api]
+# bind = "127.0.0.1:8080"
+#
+# [[api.principals]]
+# id = "alice@example.com"
+# roles = ["analyst", "approver"]
+# token_env = "AEGIS_TOKEN_ALICE"
 "#;
 
 /// Returns the recorded attack log as JSON Lines: one normalized event in each line.
@@ -288,6 +308,15 @@ mod tests {
             root.join("detections/aegis-identity")
         );
         assert_eq!(settings.agents.runtime.enabled_roles.len(), 7);
+    }
+
+    #[test]
+    fn the_starter_configuration_starts_no_operator_api() {
+        let config = Config::from_toml_str(CONFIG).unwrap();
+        assert!(!config.has_section("api"));
+        let settings = Settings::from_config(&config, Path::new("/etc/aegis"), &[]).unwrap();
+        assert!(!settings.modules.contains(aegis_core::Module::Api));
+        assert!(settings.check_api_module().is_ok());
     }
 
     #[test]

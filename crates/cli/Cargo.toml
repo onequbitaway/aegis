@@ -12,7 +12,11 @@ name = "aegis"
 path = "src/main.rs"
 
 [features]
-default = ["postgres", "plugins", "otlp"]
+default = ["postgres", "plugins", "otlp", "api"]
+# The operator API: the module `api` and the `[api]` section.
+api = ["aegis-app/api"]
+# The gRPC services of the operator API, on the port of the REST API.
+grpc = ["api", "aegis-app/grpc"]
 # PostgreSQL storage: `storage.kind = "postgres"` and `audit.kind = "postgres"`.
 postgres = ["aegis-app/postgres"]
 # WebAssembly connector plugins: the `[plugins]` section.

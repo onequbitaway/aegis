@@ -69,6 +69,9 @@ type ServiceFuture = Pin<Box<dyn Future<Output = Result<()>> + Send>>;
 ///
 /// The component gets a [`Shutdown`]. It must return when the signal is triggered. If the
 /// component returns an error, the application stops all components.
+///
+/// With the Cargo feature `api`, the function `api::service` of this crate makes the
+/// service of the operator API.
 pub struct Service {
     name: String,
     module: Option<Module>,
@@ -132,8 +135,11 @@ impl AppBuilder<'_> {
         self
     }
 
-    /// Permits a section that a different component of the process reads, for example
-    /// `api`. A section that no component reads is an error.
+    /// Permits a section that a different component of the process reads. A section that
+    /// no component reads is an error.
+    ///
+    /// With the name `api`, the application does not read the `[api]` section. The caller
+    /// then supplies the operator API for the module `api`.
     #[must_use]
     pub fn allow_section(mut self, name: impl Into<String>) -> Self {
         self.extra_sections.push(name.into());
@@ -319,6 +325,18 @@ pub struct App {
     start_recorded: AtomicBool,
     #[cfg(feature = "postgres")]
     postgres: Option<aegis_storage::PgStore>,
+}
+
+/// The state after the approval service recorded the decision of a person.
+pub(crate) struct Decided {
+    /// The approval request with the decision.
+    pub(crate) approval: ApprovalRequest,
+    /// For an approval: what the dispatcher did with the action. If the action did not
+    /// run, this is the failed outcome that the agent got. For a rejection: `None`.
+    pub(crate) disposition: Option<ActionDisposition>,
+    /// The error of a step after the record of the decision: the action did not run, or
+    /// the agent did not get the result.
+    pub(crate) failure: Option<Error>,
 }
 
 /// Sets the "service runs" flag back when [`App::run_with`] returns.
@@ -1136,9 +1154,10 @@ impl App {
     /// | `detection` | The bus runner of the detection engine, with the bridges. |
     /// | An agent module | The agent runtime. It reads incidents and tasks from the bus. |
     /// | `responder` | The playbook worker, if `response.playbooks` is not `off`. |
+    /// | `api` | The service of `options` for the module `api`: the operator API. |
     ///
-    /// It also starts the services of `options`. After the shutdown signal, each component
-    /// completes the work that is in progress, and the function returns.
+    /// It also starts the other services of `options`. After the shutdown signal, each
+    /// component completes the work that is in progress, and the function returns.
     ///
     /// # Errors
     ///
@@ -1388,6 +1407,30 @@ impl App {
         principal: &Principal,
         note: Option<String>,
     ) -> Result<ApprovalOutcome> {
+        let decided = self.record_decision(id, approve, principal, note).await?;
+        match decided.failure {
+            Some(error) => Err(error),
+            None => Ok(ApprovalOutcome {
+                approval: decided.approval,
+                disposition: decided.disposition,
+            }),
+        }
+    }
+
+    /// Does the steps of [`App::decide_approval`], and keeps the decided request when a
+    /// step after the record of the decision fails.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error of the approval service. The request then has no new decision.
+    /// A failure after the record of the decision is in [`Decided::failure`].
+    pub(crate) async fn record_decision(
+        &self,
+        id: ApprovalId,
+        approve: bool,
+        principal: &Principal,
+        note: Option<String>,
+    ) -> Result<Decided> {
         let approval = self
             .approval_service
             .decide(id, approve, principal, note)
@@ -1416,10 +1459,11 @@ impl App {
             });
             self.actions
                 .set_result(action_id, DispatchResult::Disposition(denial.clone()));
-            self.give_result_to_agent(&approval, denial).await?;
-            return Ok(ApprovalOutcome {
+            let failure = self.give_result_to_agent(&approval, denial).await.err();
+            return Ok(Decided {
                 approval,
                 disposition: None,
+                failure,
             });
         }
 
@@ -1427,11 +1471,14 @@ impl App {
             Ok(disposition) => {
                 self.actions
                     .set_result(action_id, DispatchResult::Disposition(disposition.clone()));
-                self.give_result_to_agent(&approval, disposition.clone())
-                    .await?;
-                Ok(ApprovalOutcome {
+                let failure = self
+                    .give_result_to_agent(&approval, disposition.clone())
+                    .await
+                    .err();
+                Ok(Decided {
                     approval,
                     disposition: Some(disposition),
+                    failure,
                 })
             }
             Err(error) => {
@@ -1446,14 +1493,19 @@ impl App {
                     reversible: false,
                     completed_at: Utc::now(),
                 });
-                if let Err(agent_error) = self.give_result_to_agent(&approval, failed).await {
+                if let Err(agent_error) = self.give_result_to_agent(&approval, failed.clone()).await
+                {
                     tracing::error!(
                         approval = %id,
                         error = %agent_error,
                         "the agent did not get the failure of an approved action"
                     );
                 }
-                Err(error)
+                Ok(Decided {
+                    approval,
+                    disposition: Some(failed),
+                    failure: Some(error),
+                })
             }
         }
     }

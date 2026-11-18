@@ -10,7 +10,7 @@ use aegis_contracts::Detection;
 use aegis_contracts::audit::{AuditRecord, ChainVerification};
 use aegis_contracts::bus::{BusStream, subject};
 use aegis_contracts::incident::Incident;
-use aegis_core::{Config, ModuleSet, Shutdown, TelemetryConfig, TelemetryGuard, telemetry};
+use aegis_core::{Config, Module, ModuleSet, Shutdown, TelemetryConfig, TelemetryGuard, telemetry};
 use aegis_ingest::{FileSource, FileSourceConfig};
 use aegis_policy::FileAuditLog;
 use anyhow::{Context as _, anyhow, bail};
@@ -64,11 +64,33 @@ fn read_events(path: &Path) -> anyhow::Result<Vec<aegis_contracts::Event>> {
 
 /// Returns the components that run with the application in `aegis run`.
 ///
+/// The module `api` gives the operator API. The function checks the `[api]` section with
+/// its secrets and opens the listener. Thus a configuration that is not usable stops the
+/// command before the application starts its sources.
+///
 /// This is the place to start one more long-running component from the services of the
-/// application, for example the operator API. Give the component the module that it
-/// implements with [`Service::for_module`].
-fn services(_app: &Arc<App>) -> Vec<Service> {
-    Vec::new()
+/// application. Give the component the module that it implements with
+/// [`Service::for_module`].
+async fn services(app: &Arc<App>) -> aegis_contracts::Result<Vec<Service>> {
+    // The module `api` needs the Cargo feature `api`, the `[api]` section, and an agent.
+    app.settings().check_api_module()?;
+    #[cfg(feature = "api")]
+    if app.modules().contains(Module::Api) {
+        return Ok(vec![aegis_app::api::service(app).await?]);
+    }
+    Ok(Vec::new())
+}
+
+/// Returns the address in `api.bind` if `aegis run` starts the operator API, or `off`.
+fn api_address(app: &App) -> String {
+    if !app.modules().contains(Module::Api) {
+        return "off".to_owned();
+    }
+    #[cfg(feature = "api")]
+    if let Some(api) = &app.settings().api {
+        return api.bind.to_string();
+    }
+    "off".to_owned()
 }
 
 /// `aegis run`: runs the service until SIGINT or SIGTERM.
@@ -83,13 +105,18 @@ pub async fn run(config_file: &Path, format: Format) -> anyhow::Result<()> {
     );
     let shutdown = Shutdown::new();
     shutdown.listen_for_signals()?;
-    tracing::info!(config = %config_file.display(), "AEGIS runs. Send SIGINT or SIGTERM to stop.");
 
-    let options = RunOptions {
-        stop_when_sources_end: false,
-        services: services(&app),
+    let result = match services(&app).await {
+        Ok(services) => {
+            tracing::info!(config = %config_file.display(), "AEGIS runs. Send SIGINT or SIGTERM to stop.");
+            let options = RunOptions {
+                stop_when_sources_end: false,
+                services,
+            };
+            app.run_with(shutdown, options).await
+        }
+        Err(error) => Err(error),
     };
-    let result = app.run_with(shutdown, options).await;
     app.close().await;
     let summary = result?;
     match format {
@@ -520,25 +547,40 @@ pub async fn config_check(config_file: &Path, format: Format) -> anyhow::Result<
         // the audit log. It starts no source, no detection, and no agent.
         match App::builder(&config).base_dir(&base).build().await {
             Ok(app) => {
-                let modules: Vec<&str> = app.modules().iter().map(|module| module.name()).collect();
-                summary = json!({
-                    "modules": modules,
-                    "bus": if app.settings().bus.kind == aegis_app::settings::BusKind::Memory {
-                        "memory"
-                    } else {
-                        "nats"
-                    },
-                    "storage": app.settings().storage.kind(),
-                    "model": app.has_model(),
-                    "dispatcher_dry_run": app.dispatcher().dry_run(),
-                    "agents_dry_run": app.settings().agents.runtime.dry_run,
-                    "playbook_mode": app.settings().response.playbooks,
-                    "rule_pack": app.engine().pack().manifest().name,
-                    "rules": app.engine().pack().rules().len(),
-                    "playbooks": app.playbooks().names(),
-                    "connectors": app.action_registry().names(),
-                    "sources": app.sources().names(),
-                });
+                let app = Arc::new(app);
+                // The operator API that `aegis run` would start: the check reads each
+                // secret that the `[api]` section names. It opens no socket.
+                #[cfg(feature = "api")]
+                if app.modules().contains(Module::Api)
+                    && let Err(error) =
+                        aegis_app::api::OperatorApi::new(&app).and_then(|api| api.check())
+                {
+                    problems.push(error.to_string());
+                }
+                // The summary is for a configuration that has no problem.
+                if problems.is_empty() {
+                    let modules: Vec<&str> =
+                        app.modules().iter().map(|module| module.name()).collect();
+                    summary = json!({
+                        "modules": modules,
+                        "api": api_address(&app),
+                        "bus": if app.settings().bus.kind == aegis_app::settings::BusKind::Memory {
+                            "memory"
+                        } else {
+                            "nats"
+                        },
+                        "storage": app.settings().storage.kind(),
+                        "model": app.has_model(),
+                        "dispatcher_dry_run": app.dispatcher().dry_run(),
+                        "agents_dry_run": app.settings().agents.runtime.dry_run,
+                        "playbook_mode": app.settings().response.playbooks,
+                        "rule_pack": app.engine().pack().manifest().name,
+                        "rules": app.engine().pack().rules().len(),
+                        "playbooks": app.playbooks().names(),
+                        "connectors": app.action_registry().names(),
+                        "sources": app.sources().names(),
+                    });
+                }
                 app.close().await;
             }
             Err(error) => problems.push(error.to_string()),

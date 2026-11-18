@@ -12,6 +12,7 @@ publish = false
 
 [workspace.dependencies]
 aegis-agents = { path = "crates/agents" }
+aegis-api = { path = "crates/api" }
 aegis-app = { path = "crates/app", default-features = false }
 aegis-bus = { path = "crates/bus" }
 aegis-contracts = { path = "crates/contracts" }

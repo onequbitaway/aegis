@@ -1,5 +1,6 @@
 //! A replay and a service run with PostgreSQL storage, the PostgreSQL audit log, and a
-//! NATS bus.
+//! NATS bus. With the Cargo feature `api`, the operator API then reads the same database
+//! and the same bus.
 //!
 //! The test starts two containers on free ports of the local host: PostgreSQL from
 //! `deploy/docker/postgres/Dockerfile`, and NATS with JetStream. Each name starts with
@@ -287,7 +288,14 @@ async fn a_replay_and_a_service_run_with_postgres_and_nats() {
             "kind = \"file\"\npath = \"data/audit.jsonl\"",
             "kind = \"postgres\"",
         );
-        text + "\n[[sources]]\ntype = \"file\"\nname = \"recorded\"\npath = \"events.jsonl\"\n"
+        let text =
+            text + "\n[[sources]]\ntype = \"file\"\nname = \"recorded\"\npath = \"events.jsonl\"\n";
+        // The section of the operator API. A build without the feature `api` refuses it.
+        if cfg!(feature = "api") {
+            text + API_SECTION
+        } else {
+            text
+        }
     });
     let app = Arc::new(starter.build(&config, |builder| builder).await);
     assert_eq!(app.settings().storage.kind(), "postgres");
@@ -398,9 +406,125 @@ async fn a_replay_and_a_service_run_with_postgres_and_nats() {
     assert_eq!(reader.incidents().list(None, 10).await.unwrap().len(), 1);
     assert!(reader.audit().verify().await.unwrap().valid);
 
+    #[cfg(feature = "api")]
+    the_operator_api_reads_the_database_and_the_bus(&app, &reader).await;
+
     reader.close().await;
     app.close().await;
     drop(app);
     drop(postgres);
     drop(nats);
+}
+
+/// The `[api]` section of the test: one principal that can read.
+const API_SECTION: &str = "\n[api]\nbind = \"127.0.0.1:9443\"\n\n[[api.principals]]\n\
+    id = \"vera@example.com\"\nroles = [\"analyst\"]\ntoken_env = \"AEGIS_TEST_TOKEN_VERA\"\n";
+
+/// The operator API of the application shows the incident and the audit log of
+/// PostgreSQL, and its live feed delivers a record that the application publishes on NATS.
+#[cfg(feature = "api")]
+async fn the_operator_api_reads_the_database_and_the_bus(
+    app: &Arc<aegis_app::App>,
+    reader: &PgStore,
+) {
+    use aegis_app::api::OperatorApi;
+    use serde_json::Value;
+
+    const TOKEN: &str = "vera-0123456789abcdef0123456789abcdef0";
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let api = OperatorApi::new(app)
+        .unwrap()
+        .with_env(|name| (name == "AEGIS_TEST_TOKEN_VERA").then(|| TOKEN.to_owned()))
+        .on_listener(listener)
+        .unwrap();
+    let address = api.local_addr();
+    let shutdown = Shutdown::new();
+    let server = tokio::spawn(api.serve(shutdown.clone()));
+    // A proxy of the environment must not get the requests of the test.
+    let client = reqwest::Client::builder().no_proxy().build().unwrap();
+    let get = |path: &str| {
+        let request = client
+            .get(format!("http://{address}{path}"))
+            .bearer_auth(TOKEN);
+        async move {
+            tokio::time::timeout(WAIT, request.send())
+                .await
+                .expect("the server gave no answer in time")
+                .unwrap()
+        }
+    };
+
+    // The incident and the audit log come from PostgreSQL.
+    let stored: Vec<Incident> = reader.incidents().list(None, 10).await.unwrap();
+    assert_eq!(stored.len(), 1);
+    let response = get("/api/v1/incidents").await;
+    assert_eq!(response.status(), 200);
+    let page: Value = response.json().await.unwrap();
+    let shown: Vec<Incident> = serde_json::from_value(page["items"].clone()).unwrap();
+    assert_eq!(shown, stored);
+    let response = get("/api/v1/audit/verification").await;
+    assert_eq!(response.status(), 200);
+    let verification: Value = response.json().await.unwrap();
+    assert_eq!(verification["valid"], true);
+    let records = reader.audit().read(1, 100_000).await.unwrap().len() as u64;
+    assert_eq!(verification["checked"].as_u64().unwrap(), records);
+    let refused = client
+        .get(format!("http://{address}/api/v1/incidents"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), 401);
+
+    // The live feed subscribes to NATS. A reload writes one audit record, and the
+    // application publishes it.
+    let mut feed = get("/api/v1/stream").await;
+    assert_eq!(feed.status(), 200);
+    let deadline = tokio::time::Instant::now() + WAIT;
+    let mut buffer = String::new();
+    let mut reloaded = false;
+    let record = loop {
+        let mut found = None;
+        while let Some(end) = buffer.find("\n\n") {
+            let block: String = buffer.drain(..end + 2).collect();
+            let field = |name: &str| block.lines().find_map(|line| line.strip_prefix(name));
+            match (field("event: "), field("data: ")) {
+                // The feed is open: the subscriptions exist.
+                (Some("ready"), _) if !reloaded => {
+                    app.reload().await.unwrap();
+                    reloaded = true;
+                }
+                (Some("audit"), Some(data)) => {
+                    let data: Value = serde_json::from_str(data).unwrap();
+                    let record: AuditRecord =
+                        serde_json::from_value(data["payload"].clone()).unwrap();
+                    if record.sequence > records {
+                        found = Some(record);
+                    }
+                }
+                _ => {}
+            }
+        }
+        if let Some(record) = found {
+            break record;
+        }
+        let chunk = tokio::time::timeout_at(deadline, feed.chunk())
+            .await
+            .expect("the live feed did not give the audit record in time")
+            .unwrap()
+            .expect("the live feed ended");
+        buffer.push_str(std::str::from_utf8(&chunk).unwrap());
+    };
+    assert_eq!(record.kind, AuditKind::ConfigChange);
+    assert_eq!(record.sequence, records + 1);
+    assert_eq!(
+        reader.audit().read(record.sequence, 1).await.unwrap(),
+        std::slice::from_ref(&record)
+    );
+
+    shutdown.trigger();
+    tokio::time::timeout(WAIT, server)
+        .await
+        .expect("the server did not stop in time")
+        .unwrap()
+        .unwrap();
 }

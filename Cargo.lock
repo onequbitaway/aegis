@@ -72,6 +72,7 @@ name = "aegis-app"
 version = "0.1.0"
 dependencies = [
  "aegis-agents",
+ "aegis-api",
  "aegis-bus",
  "aegis-contracts",
  "aegis-core",
@@ -87,6 +88,8 @@ dependencies = [
  "async-trait",
  "chrono",
  "futures",
+ "prost",
+ "reqwest",
  "serde",
  "serde_json",
  "tempfile",
@@ -4195,6 +4198,7 @@ dependencies = [
  "bytes",
  "futures-core",
  "futures-sink",
+ "futures-util",
  "libc",
  "pin-project-lite",
  "tokio",
