@@ -148,6 +148,7 @@ async fn the_runner_publishes_the_detections_and_the_incident_of_the_attack_log(
             rejected_messages: 0,
             detections: 9,
             incidents: 8,
+            stream_errors: 0,
         }
     );
 
@@ -215,6 +216,7 @@ async fn a_message_that_is_not_an_event_is_dropped_and_counted() {
             rejected_messages: 2,
             detections: 1,
             incidents: 1,
+            stream_errors: 0,
         }
     );
 }
@@ -587,6 +589,71 @@ async fn a_subscription_that_closes_is_an_unavailable_error_after_its_events() {
         1
     );
     assert_eq!(bus.inner.published_to("aegis.incidents").len(), 1);
+}
+
+#[tokio::test]
+async fn the_runner_continues_after_a_temporary_error_of_the_subscription() {
+    let bus = ScriptedStreamBus {
+        items: Mutex::new(vec![
+            message(&marker(1)),
+            Err(unavailable()),
+            Err(Error::Timeout("no heartbeat".to_owned())),
+            message(&marker(2)),
+        ]),
+        inner: MemoryBus::default(),
+    };
+    let engine = DetectionEngine::new(EngineConfig::default(), shipped_pack()).unwrap();
+    // The scripted stream closes after its items, so the run ends with the close error.
+    let error = run_now(
+        &engine,
+        &bus,
+        &BusRunnerConfig::default(),
+        CancellationToken::new(),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        matches!(&error, Error::Unavailable(message) if message.contains("closed the event subscription")),
+        "{error}"
+    );
+    // The runner examined the event before the errors and the event after them.
+    assert_eq!(
+        bus.inner
+            .published_to("aegis.detections.deterministic")
+            .len(),
+        2
+    );
+}
+
+#[tokio::test]
+async fn temporary_errors_in_sequence_stop_the_runner_at_the_limit() {
+    let mut items = vec![message(&marker(1))];
+    items.extend((0..16).map(|_| Err(unavailable())));
+    items.push(message(&marker(2)));
+    let bus = ScriptedStreamBus {
+        items: Mutex::new(items),
+        inner: MemoryBus::default(),
+    };
+    let engine = DetectionEngine::new(EngineConfig::default(), shipped_pack()).unwrap();
+    let error = run_now(
+        &engine,
+        &bus,
+        &BusRunnerConfig::default(),
+        CancellationToken::new(),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        matches!(&error, Error::Unavailable(message) if message == "the bus is not available"),
+        "{error}"
+    );
+    // The runner stopped at the sixteenth error and did not reach the second event.
+    assert_eq!(
+        bus.inner
+            .published_to("aegis.detections.deterministic")
+            .len(),
+        1
+    );
 }
 
 #[tokio::test]

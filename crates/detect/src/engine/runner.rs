@@ -54,7 +54,13 @@ pub struct RunSummary {
     pub detections: u64,
     /// The number of incident states that the runner published.
     pub incidents: u64,
+    /// The number of temporary errors that the event subscription gave. The runner
+    /// continued after each of them.
+    pub stream_errors: u64,
 }
+
+/// The number of temporary subscription errors in sequence that stops the runner.
+const MAX_STREAM_ERRORS_IN_SEQUENCE: u32 = 16;
 
 /// Publishes one message. Tries again after an error that a retry can correct.
 async fn publish(
@@ -107,7 +113,10 @@ impl DetectionEngine {
     /// # Errors
     ///
     /// - [`Error::Config`] if the durable name is empty or `publish_attempts` is zero.
-    /// - The error of the bus, if the subscription fails or the stream gives an error.
+    /// - The error of the bus, if the subscription fails, or if the stream gives an error
+    ///   that a retry cannot correct. The runner continues after an error that a retry
+    ///   can correct (for example a lost connection), until the stream gives 16 such
+    ///   errors in sequence.
     /// - [`Error::Unavailable`] if the bus closes the subscription.
     /// - The error of [`DetectionEngine::process`].
     /// - The error of the bus, if a message cannot be published after
@@ -135,6 +144,7 @@ impl DetectionEngine {
         let detection_subject = |tier| format!("{}.{}", subject::DETECTIONS, tier_token(tier));
 
         let mut summary = RunSummary::default();
+        let mut stream_errors_in_sequence: u32 = 0;
         loop {
             let next = tokio::select! {
                 biased;
@@ -142,8 +152,23 @@ impl DetectionEngine {
                 next = stream.next() => next,
             };
             let message = match next {
-                Some(Ok(message)) => message,
-                Some(Err(error)) => return Err(error),
+                Some(Ok(message)) => {
+                    stream_errors_in_sequence = 0;
+                    message
+                }
+                Some(Err(error)) => {
+                    // A bus can report an outage as an error and then continue the same
+                    // subscription. The durable consumer keeps the position.
+                    stream_errors_in_sequence += 1;
+                    if !error.is_retryable()
+                        || stream_errors_in_sequence >= MAX_STREAM_ERRORS_IN_SEQUENCE
+                    {
+                        return Err(error);
+                    }
+                    tracing::warn!(%error, "the event subscription of the detection runner gave a temporary error");
+                    summary.stream_errors = summary.stream_errors.saturating_add(1);
+                    continue;
+                }
                 None => {
                     return Err(Error::Unavailable(
                         "the bus closed the event subscription of the detection runner".to_owned(),
