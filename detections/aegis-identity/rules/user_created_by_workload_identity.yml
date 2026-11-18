@@ -1,0 +1,24 @@
+title: User account created by a workload identity
+id: 3f6b9d2c-7e10-4a85-9b4c-5d8e2f0a7c16
+status: test
+description: >-
+  A service principal or an application created a user account. An attacker with a
+  workload credential makes accounts to keep access.
+author: AEGIS project
+references:
+  - https://attack.mitre.org/techniques/T1136/003/
+detection:
+  selection:
+    action: user.create
+    actor.kind:
+      - service_principal
+      - application
+  filter_failed:
+    outcome: failure
+  condition: selection and not filter_failed
+falsepositives:
+  - A provisioning service that creates accounts from the personnel system.
+level: medium
+tags:
+  - attack.persistence
+  - attack.t1136.003

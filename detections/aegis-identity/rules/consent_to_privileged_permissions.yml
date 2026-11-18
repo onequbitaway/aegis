@@ -1,0 +1,36 @@
+title: Consent to privileged application permissions
+id: 5b0f3c2e-8a41-4d6f-9c57-2e1a7b90d314
+status: stable
+description: >-
+  A principal consented to permissions that give an application wide access to the
+  directory, to roles, or to mail. An attacker uses such a consent to keep access after
+  the password of the account changes.
+author: AEGIS project
+references:
+  - https://attack.mitre.org/techniques/T1528/
+logsource:
+  category: user_access_management
+detection:
+  selection:
+    action: oauth.consent_grant
+  privileged_flag:
+    privileged: true
+  privileged_scope:
+    scopes:
+      - '*.ReadWrite.All'
+      - 'RoleManagement.*'
+      - 'AppRoleAssignment.*'
+      - 'Directory.AccessAsUser.All'
+      - 'Mail.Read'
+      - 'Mail.ReadWrite'
+      - 'Mail.Send'
+      - 'full_access_as_app'
+  filter_failed:
+    outcome: failure
+  condition: selection and 1 of privileged_* and not filter_failed
+falsepositives:
+  - An administrator who installs an approved application.
+level: high
+tags:
+  - attack.credential-access
+  - attack.t1528

@@ -1,0 +1,12 @@
+# The entities that the policy `protected_entities.rego` protects.
+#
+# Each entry has the kind and the identifier of one entity, as AEGIS gets them from the
+# source system. Examples of kinds: user, service_principal, application, host, device.
+#
+# Replace these entries with the entities of your environment.
+aegis:
+  protected_entities:
+    - kind: user
+      id: emergency-access@example.com
+    - kind: service_principal
+      id: sp-backup-operator

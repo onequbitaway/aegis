@@ -1,0 +1,29 @@
+title: Privileged application permission granted
+id: e2f8a6c1-9d47-4b53-b0e6-3a5c8d7f1b02
+status: test
+description: >-
+  A person granted a privileged application permission to a service principal. The
+  permission lets the application act without a signed-in user. Make sure that an
+  administrator approved the grant.
+author: AEGIS project
+references:
+  - https://attack.mitre.org/techniques/T1098/003/
+logsource:
+  category: user_access_management
+detection:
+  selection:
+    action: app.permission_grant
+    privileged: true
+  filter_workload_identity:
+    actor.kind:
+      - service_principal
+      - application
+  filter_failed:
+    outcome: failure
+  condition: selection and not 1 of filter_*
+falsepositives:
+  - An administrator who sets up an approved application.
+level: medium
+tags:
+  - attack.persistence
+  - attack.t1098.003

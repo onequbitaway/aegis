@@ -1,0 +1,104 @@
+# Contain a service principal that an attacker controls.
+#
+# This playbook is for the attack in fixtures/artex_style_attack.jsonl: a password spray
+# finds one user, the user consents to a rogue application, and the service principal of
+# the application gets a new credential and a privileged role.
+#
+# All actions change only the tenant, the firewall, the chat channel, and the ticket system
+# of the operator. Run the playbook in dry-run mode first.
+#
+# Each step continues after a failure. Thus a containment step that fails does not stop
+# the notification and the ticket. The run report shows each failure.
+name: contain-rogue-service-principal
+description: >-
+  Disable a service principal that shows signs of attacker control, revoke its new
+  credential, stop the sessions of the compromised user, block the source address, and
+  tell the security team.
+trigger:
+  min_severity: high
+  techniques_any:
+    - T1528      # Steal Application Access Token: consent to privileged scopes
+    - T1098.001  # Additional Cloud Credentials
+    - T1098.003  # Additional Cloud Roles
+  entity_kinds:
+    - service_principal
+steps:
+  - id: disable-service-principal
+    action: disable_service_principal
+    target:
+      each_entity: service_principal
+    max_targets: 5
+    reason: >-
+      Incident {{incident.id}} ({{incident.severity}}): the service principal
+      {{target.name}} shows signs of attacker control ({{incident.techniques}}).
+      Disable it. The operator can enable it again.
+    continue_on_error: true
+
+  - id: revoke-credential
+    action: revoke_credential
+    target:
+      each_entity: service_principal
+    max_targets: 5
+    parameters:
+      # The detection for the new credential must supply the attribute credential_id.
+      key_id: "{{detection.credential_id}}"
+    reason: >-
+      Incident {{incident.id}}: remove the credential that the attacker added to the
+      service principal {{target.name}}.
+    continue_on_error: true
+
+  - id: kill-user-sessions
+    action: kill_session
+    target:
+      each_entity: user
+    max_targets: 10
+    reason: >-
+      Incident {{incident.id}}: the account {{target.name}} is compromised. Stop its
+      sign-in sessions, so that the attacker must sign in again.
+    continue_on_error: true
+
+  - id: block-source-address
+    action: block_ip
+    target:
+      each_entity: ip_address
+    max_targets: 10
+    parameters:
+      direction: inbound
+      duration_hours: 72
+      comment: "AEGIS incident {{incident.id}}"
+    reason: >-
+      Incident {{incident.id}}: the attack came from the address {{target.id}}. Block it
+      in the firewall of the operator.
+    continue_on_error: true
+
+  - id: notify-security-team
+    action: notify
+    target:
+      fixed:
+        kind: other
+        id: security-operations
+        name: Security operations channel
+    parameters:
+      title: "{{incident.title}}"
+      severity: "{{incident.severity}}"
+      techniques: "{{incident.techniques}}"
+    reason: >-
+      Incident {{incident.id}} ({{incident.severity}}): AEGIS started the containment of a
+      rogue service principal. Playbook: {{playbook.name}}.
+    continue_on_error: true
+
+  - id: open-ticket
+    action: open_ticket
+    target:
+      fixed:
+        kind: other
+        id: incident-response
+        name: Incident response queue
+    parameters:
+      title: "Rogue service principal: {{incident.title}}"
+      priority: "{{incident.severity}}"
+    reason: >-
+      Incident {{incident.id}}: record the containment of a rogue service principal and
+      the follow-up work: examine the consent grant, the role assignment, and the API
+      activity of the service principal.
+    continue_on_error: true

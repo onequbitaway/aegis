@@ -1,0 +1,21 @@
+title: Honeytoken used
+id: 0c9e4f7a-2b6d-4e18-a3f5-7d21c6b8e940
+status: stable
+description: >-
+  A principal read or used a honeytoken. No approved task uses a honeytoken. Each use
+  shows an intruder or a compromised identity.
+author: AEGIS project
+references:
+  - https://attack.mitre.org/techniques/T1552/
+detection:
+  selection_action:
+    action: honeytoken.trip
+  selection_attribute:
+    honeytoken_id|exists: true
+  condition: 1 of selection_*
+falsepositives:
+  - A test of the honeytoken by the security team.
+level: critical
+tags:
+  - attack.credential-access
+  - attack.t1552

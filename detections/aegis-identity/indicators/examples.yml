@@ -1,0 +1,48 @@
+# Example indicators that show the file format.
+#
+# Each address is in a documentation range (RFC 5737 and RFC 3849). Each domain uses the
+# reserved top-level domain "example" (RFC 2606). No value refers to a real system.
+# Replace this file with indicators from your threat intelligence source.
+indicators:
+  - type: ip
+    value: 192.0.2.200/29
+    description: Example network of a relay that an attacker uses for sign-in attempts.
+    severity: high
+    tags:
+      - attack.command-and-control
+      - attack.t1090.003
+  - type: ip
+    value: 203.0.113.224/28
+    description: Example network of a hosting provider with a bad reputation.
+    severity: medium
+    tags:
+      - attack.command-and-control
+      - attack.t1090
+  - type: ip
+    value: 2001:db8:bad::/48
+    description: Example IPv6 network of a relay that an attacker uses.
+    severity: high
+    tags:
+      - attack.command-and-control
+      - attack.t1090.003
+  - type: domain
+    value: sign-in-check.example
+    description: Example domain of a counterfeit sign-in page.
+    severity: high
+    tags:
+      - attack.initial-access
+      - attack.t1566.002
+  - type: user_agent
+    value: example-password-tester/
+    description: Example user agent of a password guessing tool.
+    severity: medium
+    tags:
+      - attack.credential-access
+      - attack.t1110
+  - type: app_id
+    value: app-example-consent-trap
+    description: Example identifier of an application that asks for consent to steal access.
+    severity: high
+    tags:
+      - attack.credential-access
+      - attack.t1528

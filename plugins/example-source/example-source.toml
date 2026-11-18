@@ -1,0 +1,19 @@
+# The manifest of the example source plugin.
+#
+# To install the plugin, copy this file and `example_source.wasm` to the plugin directory
+# of AEGIS.
+
+# The name of the connector instance. AEGIS publishes the events of this plugin on the
+# subject `aegis.events.example-source`.
+name = "example-source"
+kind = "source"
+# The path of the component file, relative to the directory of this file.
+component = "example_source.wasm"
+# To pin the component, put the output of `shasum -a 256 example_source.wasm` here.
+# sha256 = "..."
+# The time between two `poll` calls, in milliseconds.
+poll_interval_ms = 30000
+
+# The plugin reads these values with `config-get`. Each value is a string.
+[config]
+page_size = "2"

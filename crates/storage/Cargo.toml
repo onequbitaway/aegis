@@ -1,0 +1,37 @@
+[package]
+name = "aegis-storage"
+description = "PostgreSQL storage for AEGIS: the Defensive Graph, embeddings, incidents, the audit log, and approvals."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[features]
+# Tests that need a real database. They use Docker or `AEGIS_TEST_DATABASE_URL`.
+docker-tests = []
+
+[dependencies]
+aegis-contracts.workspace = true
+async-trait.workspace = true
+chrono.workspace = true
+secrecy = { version = "0.10.3", features = ["serde"] }
+serde.workspace = true
+serde_json = { workspace = true, features = ["float_roundtrip"] }
+sqlx = { version = "0.9.0", default-features = false, features = ["chrono", "migrate", "postgres", "runtime-tokio", "tls-rustls-aws-lc-rs", "uuid"] }
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+url = "2.5.8"
+uuid.workspace = true
+
+[dev-dependencies]
+aegis-testkit.workspace = true
+
+[[test]]
+name = "postgres"
+path = "tests/postgres/main.rs"
+required-features = ["docker-tests"]
+
+[lints]
+workspace = true

@@ -1,0 +1,35 @@
+# The guest plugins have their own workspace. The root workspace excludes this directory,
+# because guest code compiles to WebAssembly and the generated bindings use `unsafe`.
+[workspace]
+resolver = "3"
+members = ["example-source", "example-action", "tests/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/onequbitaway/aegis"
+publish = false
+
+[workspace.dependencies]
+chrono = { version = "0.4.45", default-features = false, features = ["std"] }
+serde_json = "1.0.154"
+wasip2 = "2.0.1"
+wit-bindgen = "0.63.0"
+
+[workspace.lints.rust]
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+dbg_macro = "deny"
+todo = "deny"
+unimplemented = "deny"
+
+# Small components load faster. `panic = "abort"` turns a panic into a trap, which the
+# host reports as an error.
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"

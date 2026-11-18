@@ -1,0 +1,19 @@
+# The manifest of the example action plugin.
+#
+# To install the plugin, copy this file and `example_action.wasm` to the plugin directory
+# of AEGIS. Then set `allowed_hosts` and `webhook_url` to the values of your webhook.
+
+# The name of the connector instance.
+name = "webhook-notify"
+kind = "action"
+# The path of the component file, relative to the directory of this file.
+component = "example_action.wasm"
+# To pin the component, put the output of `shasum -a 256 example_action.wasm` here.
+# sha256 = "..."
+# The only destinations that the plugin can send HTTP requests to. Each entry is `host` or
+# `host:port`. The match is exact. An entry without a port permits only port 443.
+allowed_hosts = ["hooks.example.com"]
+
+# The plugin reads these values with `config-get`. Each value is a string.
+[config]
+webhook_url = "https://hooks.example.com/services/replace-this-path"

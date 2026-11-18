@@ -1,0 +1,49 @@
+# Contain a user account that an attacker uses.
+name: contain-compromised-user
+description: >-
+  Stop the sessions of a compromised user account, disable the account, and open a ticket
+  for the password reset.
+trigger:
+  min_severity: high
+  techniques_any:
+    - T1078      # Valid Accounts, with all sub-techniques
+    - T1621      # Multi-Factor Authentication Request Generation
+    - T1556.006  # Modify Authentication Process: Multi-Factor Authentication
+  entity_kinds:
+    - user
+steps:
+  - id: kill-user-sessions
+    action: kill_session
+    target:
+      each_entity: user
+    max_targets: 5
+    reason: >-
+      Incident {{incident.id}}: the account {{target.name}} is compromised. Stop its
+      sign-in sessions.
+    continue_on_error: true
+
+  - id: disable-user
+    action: disable_user
+    target:
+      each_entity: user
+    max_targets: 5
+    reason: >-
+      Incident {{incident.id}} ({{incident.severity}}): disable the account
+      {{target.name}} until its owner sets a new password. The operator can enable it
+      again.
+    continue_on_error: true
+
+  - id: open-ticket
+    action: open_ticket
+    target:
+      fixed:
+        kind: other
+        id: identity-team
+        name: Identity team queue
+    parameters:
+      title: "Compromised account: {{incident.title}}"
+      priority: "{{incident.severity}}"
+    reason: >-
+      Incident {{incident.id}}: reset the password and examine the authentication methods
+      of each account in the incident.
+    continue_on_error: true

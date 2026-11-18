@@ -17,6 +17,12 @@
 //! A store must return each record with the same field values that it received. Record
 //! times have microsecond precision, so a store must keep microseconds. A store must not
 //! change the number format in `payload`.
+//!
+//! # Rules for readers
+//!
+//! A reader that decodes a record from JSON and then checks its hash must decode each
+//! number to exactly the value that the writer encoded. With `serde_json`, this needs the
+//! `float_roundtrip` feature. The AEGIS workspace turns that feature on for all crates.
 
 use async_trait::async_trait;
 use chrono::{DateTime, SubsecRound, Utc};

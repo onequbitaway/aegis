@@ -1,0 +1,27 @@
+title: Account locked after failed sign-ins
+id: 1d4f7a9c-8e26-4b3d-a5c0-6b9e2d1f8a75
+status: test
+description: >-
+  The identity system locked an account because of many failed sign-ins. The lock shows
+  password guessing against the account.
+author: AEGIS project
+references:
+  - https://attack.mitre.org/techniques/T1110/
+logsource:
+  category: authentication
+detection:
+  selection:
+    action: sign_in
+    outcome: failure
+  reason_code:
+    error_code: 50053
+  reason_text:
+    failure_reason|contains: account is locked
+  condition: selection and 1 of reason_*
+falsepositives:
+  - A user who forgot a password.
+  - A device with an old stored password.
+level: low
+tags:
+  - attack.credential-access
+  - attack.t1110

@@ -1,0 +1,164 @@
+/// The interface between AEGIS and a connector plugin.
+///
+/// A plugin is a WebAssembly component. It implements one of the two worlds in this
+/// package. The plugin and the host exchange the AEGIS contract types as JSON text.
+/// Thus this interface stays small when the contract types get new fields.
+package aegis:plugin@0.1.0;
+
+/// The types that the two plugin worlds share.
+interface types {
+    /// The cause of a failed call. Each case has a message for the operator.
+    ///
+    /// Do not put a secret, a token, or a full payload in a message.
+    variant error {
+        /// The input is not valid. A retry cannot succeed.
+        invalid-input(string),
+        /// The resource does not exist.
+        not-found(string),
+        /// The credentials are missing or not valid, or the operation is not permitted.
+        unauthorized(string),
+        /// The plugin or the host does not support the operation.
+        unsupported(string),
+        /// An upstream system is not available. A retry can succeed.
+        unavailable(string),
+        /// An upstream system limited the request rate. A retry can succeed.
+        rate-limited(string),
+        /// The operation did not complete in the permitted time. A retry can succeed.
+        timeout(string),
+        /// A failure that has no more specific case.
+        other(string),
+    }
+}
+
+/// The functions that the host gives to a plugin.
+///
+/// A plugin has no filesystem, no environment variables, and no sockets. These functions
+/// are the only path from a plugin to the world outside the sandbox.
+interface host {
+    use types.{error};
+
+    /// The importance of a log message.
+    enum log-level {
+        /// Data for a developer who follows the control flow.
+        trace,
+        /// Data for a developer who looks for a fault.
+        debug,
+        /// A normal operation.
+        info,
+        /// A condition that can become a fault.
+        warn,
+        /// A fault.
+        error,
+    }
+
+    /// An HTTP request that the host sends for the plugin.
+    record request {
+        /// The method: `GET`, `HEAD`, `POST`, `PUT`, `PATCH`, or `DELETE`.
+        method: string,
+        /// The absolute URL. The scheme must be `https`. The host permits `http` only for a
+        /// loopback address. The host and the port must be in `allowed_hosts` of the
+        /// plugin manifest.
+        url: string,
+        /// The header names and values. The host refuses connection-level headers, for
+        /// example `host` and `transfer-encoding`.
+        headers: list<tuple<string, string>>,
+        /// The body, if the request has one.
+        body: option<list<u8>>,
+    }
+
+    /// The answer to a `request`.
+    record response {
+        /// The status code. The host does not follow a redirect, thus a 3xx status is
+        /// possible.
+        status: u16,
+        /// The header names in lower case, and the values.
+        headers: list<tuple<string, string>>,
+        /// The body. The host returns an error when the body is larger than its limit.
+        body: list<u8>,
+    }
+
+    /// Returns the value of `key` from the `[config]` table of the plugin manifest.
+    config-get: func(key: string) -> option<string>;
+
+    /// Writes one message to the log of the host.
+    ///
+    /// The host keeps a limited number of messages from one call, and a limited number of
+    /// characters from one message. It drops the remainder.
+    log: func(level: log-level, message: string);
+
+    /// Sends one HTTP request and returns the full response.
+    ///
+    /// The host refuses a request to a destination that is not in `allowed_hosts`. Then the
+    /// result is the `unauthorized` case, and the host sends nothing.
+    ///
+    /// The host limits the number of requests in one call. A refused request counts. After
+    /// the limit, the result is the `other` case.
+    http-request: func(request: request) -> result<response, error>;
+}
+
+/// The functions that a source connector plugin implements.
+interface source {
+    use types.{error};
+
+    /// Returns the JSON form of `ConnectorInfo`: `name`, `vendor`, `product`, `version`.
+    ///
+    /// The host replaces `name` with the name from the plugin manifest.
+    info: func() -> string;
+
+    /// Checks that the plugin can reach its source system.
+    check: func() -> result<_, error>;
+
+    /// Returns the events that are new after `cursor`, as the JSON form of `EventBatch`.
+    ///
+    /// The host calls this function again and again. With no `cursor`, start at the
+    /// present time. Put the position after the batch in `next_cursor`. The host sends
+    /// that value in the next call. When `next_cursor` is absent, the host sends the
+    /// previous cursor again. A batch can be empty.
+    poll: func(cursor: option<string>) -> result<string, error>;
+
+    /// Returns one page of past events, as the JSON form of `EventBatch`.
+    ///
+    /// `start` and `end` are RFC 3339 times. `start` is inclusive and `end` is exclusive.
+    /// `cursor` is absent for the first page. An absent `next_cursor` in the batch means
+    /// that the read is complete.
+    fetch: func(start: string, end: string, cursor: option<string>) -> result<string, error>;
+}
+
+/// The functions that an action connector plugin implements.
+interface action {
+    use types.{error};
+
+    /// Returns the JSON form of `ConnectorInfo`: `name`, `vendor`, `product`, `version`.
+    ///
+    /// The host replaces `name` with the name from the plugin manifest.
+    info: func() -> string;
+
+    /// Returns the action types that the plugin can do, as a JSON array of `ActionKind`.
+    ///
+    /// Example: `["notify", {"custom": "quarantine_mailbox"}]`.
+    supported-actions: func() -> string;
+
+    /// Does one action. The parameter is the JSON form of `ActionRequest`. The result is
+    /// the JSON form of `ActionOutcome`.
+    ///
+    /// When `dry_run` is `true` in the request, change nothing. Report what the action
+    /// would do, with the status `simulated`. The host refuses the status `succeeded` for
+    /// a dry run, and the status `simulated` for a request that is not a dry run.
+    execute: func(request-json: string) -> result<string, error>;
+
+    /// Undoes an action that this plugin did before. The parameter and the result are the
+    /// same as for `execute`. Return the `unsupported` case if the plugin cannot undo.
+    revert: func(request-json: string) -> result<string, error>;
+}
+
+/// A plugin that reads telemetry and emits normalized events.
+world source-connector {
+    import host;
+    export source;
+}
+
+/// A plugin that does response actions in the environment of the operator.
+world action-connector {
+    import host;
+    export action;
+}

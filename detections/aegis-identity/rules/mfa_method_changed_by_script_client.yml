@@ -1,0 +1,29 @@
+title: Multi-factor authentication method changed by a script client
+id: c7a3f0e5-5d28-4b91-9e6c-4f1a8d2b7e30
+status: test
+description: >-
+  A client that is not a browser or an official application changed a multi-factor
+  authentication method. An attacker registers a method to keep access to an account.
+author: AEGIS project
+references:
+  - https://attack.mitre.org/techniques/T1556/006/
+detection:
+  selection:
+    action: mfa.method_change
+    actor.user_agent|contains:
+      - python
+      - curl/
+      - go-http-client
+      - okhttp
+      - node-fetch
+      - axios/
+      - powershell
+  filter_failed:
+    outcome: failure
+  condition: selection and not filter_failed
+falsepositives:
+  - An approved onboarding script.
+level: medium
+tags:
+  - attack.persistence
+  - attack.t1556.006

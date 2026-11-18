@@ -1,0 +1,36 @@
+[package]
+name = "aegis-bus"
+description = "The AEGIS message bus on NATS JetStream, with an in-process bus for deployments that have no NATS server."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[features]
+# Runs the tests that need a real NATS server in Docker, or the server in AEGIS_TEST_NATS_URL.
+docker-tests = []
+
+[dependencies]
+aegis-contracts.workspace = true
+async-nats = { version = "0.52.0", default-features = false, features = ["aws-lc-rs", "jetstream", "nkeys", "server_2_10", "server_2_11", "server_2_12", "server_2_14"] }
+async-trait.workspace = true
+futures.workspace = true
+humantime-serde = "1.1.1"
+secrecy = { version = "0.10.3", features = ["serde"] }
+serde.workspace = true
+tokio = { workspace = true, features = ["fs"] }
+tracing.workspace = true
+
+[dev-dependencies]
+aegis-testkit.workspace = true
+base64 = "0.23.1"
+nkeys = "0.4.5"
+rcgen = "0.14.10"
+serde_json.workspace = true
+tempfile = "3.27.0"
+tokio = { workspace = true, features = ["test-util"] }
+toml = "0.9.8"
+
+[lints]
+workspace = true

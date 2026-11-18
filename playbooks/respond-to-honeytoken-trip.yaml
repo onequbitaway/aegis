@@ -1,0 +1,54 @@
+# Respond to a read or a use of a honeytoken.
+#
+# The honeytoken detector of AEGIS maps a trip to T1552 (a decoy secret or credential),
+# T1087 (a decoy account), or T1078 (a use of the decoy). A trip has no legitimate cause.
+# This playbook saves the evidence and tells the security team. It does not act on the
+# identity that touched the decoy: use an identity playbook for that.
+name: respond-to-honeytoken-trip
+description: >-
+  Save the evidence of a honeytoken trip, block the source address, and tell the security
+  team.
+trigger:
+  min_severity: high
+  techniques_any:
+    - T1552  # Unsecured Credentials, with all sub-techniques
+    - T1087  # Account Discovery, with all sub-techniques
+steps:
+  - id: snapshot-evidence
+    action: snapshot_evidence
+    target: incident_tenant
+    parameters:
+      scope: incident
+      incident_id: "{{incident.id}}"
+    reason: >-
+      Incident {{incident.id}}: save the events of the honeytoken trip before the
+      retention time of the source ends.
+    continue_on_error: true
+
+  - id: block-source-address
+    action: block_ip
+    target:
+      each_entity: ip_address
+    max_targets: 5
+    parameters:
+      direction: inbound
+      duration_hours: 72
+      comment: "AEGIS incident {{incident.id}}"
+    reason: >-
+      Incident {{incident.id}}: the address {{target.id}} touched a honeytoken. Block it.
+    continue_on_error: true
+
+  - id: notify-security-team
+    action: notify
+    target:
+      fixed:
+        kind: other
+        id: security-operations
+        name: Security operations channel
+    parameters:
+      title: "{{incident.title}}"
+      severity: "{{incident.severity}}"
+    reason: >-
+      Incident {{incident.id}} ({{incident.severity}}): an identity touched a honeytoken.
+      An attacker is in the environment. Examine the identity immediately.
+    continue_on_error: true

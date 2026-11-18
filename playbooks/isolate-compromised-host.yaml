@@ -1,0 +1,51 @@
+# Isolate a host that runs attacker code.
+name: isolate-compromised-host
+description: >-
+  Save the evidence of a compromised host, isolate the host from the network through the
+  EDR product of the operator, and open a ticket.
+trigger:
+  min_severity: high
+  techniques_any:
+    - T1486  # Data Encrypted for Impact
+    - T1059  # Command and Scripting Interpreter, with all sub-techniques
+    - T1003  # OS Credential Dumping, with all sub-techniques
+    - T1021  # Remote Services, with all sub-techniques
+  entity_kinds:
+    - host
+steps:
+  - id: snapshot-evidence
+    action: snapshot_evidence
+    target:
+      each_entity: host
+    max_targets: 5
+    parameters:
+      scope: host
+    reason: >-
+      Incident {{incident.id}}: save the volatile data of the host {{target.name}} before
+      the isolation.
+    continue_on_error: true
+
+  - id: isolate-host
+    action: isolate_host
+    target:
+      each_entity: host
+    max_targets: 5
+    reason: >-
+      Incident {{incident.id}} ({{incident.severity}}): the host {{target.name}} runs
+      attacker code ({{incident.techniques}}). Isolate it from the network. The operator
+      can release it again.
+    continue_on_error: true
+
+  - id: open-ticket
+    action: open_ticket
+    target:
+      fixed:
+        kind: other
+        id: incident-response
+        name: Incident response queue
+    parameters:
+      title: "Isolated host: {{incident.title}}"
+      priority: "{{incident.severity}}"
+    reason: >-
+      Incident {{incident.id}}: examine and rebuild each isolated host.
+    continue_on_error: true

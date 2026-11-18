@@ -1,0 +1,17 @@
+[package]
+name = "greedy-source"
+description = "A source connector plugin that needs an import that the host does not give. Only the host tests use it."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wit-bindgen.workspace = true
+
+[lints]
+workspace = true

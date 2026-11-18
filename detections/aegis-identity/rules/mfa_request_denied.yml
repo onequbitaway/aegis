@@ -1,0 +1,30 @@
+title: Multi-factor authentication request denied
+id: 6e2d8b4a-1f93-4c60-8d2e-9a7f3b5c0e47
+status: test
+description: >-
+  A sign-in had the correct password, but the user denied the multi-factor
+  authentication request or reported it as fraud. The password of the account is
+  possibly known to an attacker who sends requests until the user approves one.
+author: AEGIS project
+references:
+  - https://attack.mitre.org/techniques/T1621/
+logsource:
+  category: authentication
+detection:
+  selection:
+    action: sign_in
+    outcome: failure
+  reason_code:
+    error_code: 500121
+  reason_text:
+    failure_reason|contains:
+      - denied the authentication request
+      - declined the authentication request
+      - reported fraud
+  condition: selection and 1 of reason_*
+falsepositives:
+  - A user who denies a request by mistake.
+level: medium
+tags:
+  - attack.credential-access
+  - attack.t1621

@@ -1,0 +1,31 @@
+title: Privileged role assigned by a workload identity
+id: a4d7e1b9-6c35-4f02-8e7a-1b9c0d5f2a63
+status: stable
+description: >-
+  A service principal or an application assigned a privileged directory role or a
+  privileged application permission. Workload identities do not usually manage
+  privileged access. An attacker with a workload credential uses this step to get
+  administrator rights.
+author: AEGIS project
+references:
+  - https://attack.mitre.org/techniques/T1098/003/
+logsource:
+  category: user_access_management
+detection:
+  selection:
+    action:
+      - role.assign
+      - app.permission_grant
+    actor.kind:
+      - service_principal
+      - application
+    privileged: true
+  filter_failed:
+    outcome: failure
+  condition: selection and not filter_failed
+falsepositives:
+  - An approved automation that manages role assignments. Add a filter for its identifier.
+level: high
+tags:
+  - attack.privilege-escalation
+  - attack.t1098.003

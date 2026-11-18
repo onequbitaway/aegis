@@ -1,0 +1,36 @@
+[package]
+name = "aegis-policy"
+description = "The policy engine, role-based access control, approvals, and the file audit log of AEGIS."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+aegis-contracts.workspace = true
+async-trait.workspace = true
+chrono.workspace = true
+hex.workspace = true
+regorus = { version = "0.15.0", default-features = false, features = ["std", "arc", "glob", "net", "regex", "time"] }
+serde.workspace = true
+serde-saphyr = "2.1.1"
+serde_json = { workspace = true, features = ["float_roundtrip"] }
+sha2.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+aegis-testkit.workspace = true
+futures.workspace = true
+tempfile = "3.27.0"
+toml = "0.9.8"
+
+# This test starts itself again as a second process, so it has no test harness.
+[[test]]
+name = "second_process"
+harness = false
+
+[lints]
+workspace = true
