@@ -180,6 +180,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "aegis-decoy"
+version = "0.1.0"
+dependencies = [
+ "aegis-contracts",
+ "aegis-ingest",
+ "aegis-testkit",
+ "async-trait",
+ "chrono",
+ "futures",
+ "hex",
+ "hmac",
+ "httparse",
+ "humantime-serde",
+ "serde",
+ "serde_json",
+ "sha2 0.11.1",
+ "subtle",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+ "toml",
+ "tracing",
+]
+
+[[package]]
 name = "aegis-detect"
 version = "0.1.0"
 dependencies = [
