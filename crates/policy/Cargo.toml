@@ -25,7 +25,7 @@ tracing.workspace = true
 aegis-testkit.workspace = true
 futures.workspace = true
 tempfile = "3.27.0"
-toml = "0.9.8"
+toml = "1.2.1"
 
 # This test starts itself again as a second process, so it has no test harness.
 [[test]]
