@@ -72,15 +72,18 @@ The configuration examples/local-model/aegis.toml is valid.
   api: off
   bus: memory
   connectors: honeytokens, simulation
+  decoy: off
   dispatcher_dry_run: true
+  evidence_archive: off
   model: true
   modules: ingest, detection, monitor, hunter, analyst, responder, deception, reporter
   playbook_mode: dry_run
-  playbooks: block-password-spray-source, contain-compromised-user, contain-rogue-service-principal, isolate-compromised-host, respond-to-honeytoken-trip
+  playbooks: block-password-spray-source, contain-compromised-user, contain-rogue-service-principal, isolate-compromised-host, raise-friction-critical-identity-incident, respond-to-honeytoken-trip
   rule_pack: aegis-identity
-  rules: 9
-  sources:
+  rules: 11
+  sources: 
   storage: memory
+  timed_revert: off
 ```
 
 The line `model: true` shows that the configuration has a model. The check sends no

@@ -60,15 +60,18 @@ The configuration examples/entra/aegis.toml is valid.
   api: off
   bus: memory
   connectors: entra-graph, honeytokens, simulation
+  decoy: off
   dispatcher_dry_run: true
+  evidence_archive: off
   model: false
   modules: ingest, detection, monitor, hunter, analyst, responder, deception, reporter
   playbook_mode: dry_run
-  playbooks: block-password-spray-source, contain-compromised-user, contain-rogue-service-principal, isolate-compromised-host, respond-to-honeytoken-trip
+  playbooks: block-password-spray-source, contain-compromised-user, contain-rogue-service-principal, isolate-compromised-host, raise-friction-critical-identity-incident, respond-to-honeytoken-trip
   rule_pack: aegis-identity
-  rules: 9
+  rules: 11
   sources: entra-prod
   storage: memory
+  timed_revert: off
 ```
 
 The check starts no source and sends no request to Microsoft. It does not prove that the

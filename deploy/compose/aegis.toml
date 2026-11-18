@@ -71,8 +71,19 @@ dry_run = true
 playbooks = "dry_run"
 playbook_dir = "playbooks"
 
+# The timed revert. A containment action with a revert time runs first. AEGIS reverts it
+# at that time, unless a person confirms it. The file in the volume `aegis-data` holds
+# the pending reverts, so a restart does not lose them.
+[response.revert]
+store = "/var/lib/aegis/pending-reverts.json"
+
 [ingest]
 checkpoint_dir = "/var/lib/aegis/checkpoints"
+
+# The evidence archive: each detection, the events that caused it, and each state of an
+# incident. The commands `aegis report abuse` and `aegis indicators export` read it.
+[evidence]
+path = "/var/lib/aegis/evidence.jsonl"
 
 # The recorded attack log of the repository. AEGIS reads the file one time. The
 # checkpoint in the volume `aegis-data` stops a second read after a restart.

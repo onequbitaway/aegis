@@ -83,6 +83,15 @@ config:
     # -- How the playbooks run: `off`, `dry_run`, or `live`.
     playbooks: dry_run
     playbookDir: playbooks
+    # -- Keep the timed reverts in /var/lib/aegis/pending-reverts.json. With `false`, an
+    # action with a revert time runs only as a dry run. One pod uses one file.
+    timedRevert: true
+  evidence:
+    # -- Keep the evidence archive in /var/lib/aegis/evidence.jsonl: each detection, the
+    # events that caused it, and each state of an incident. The sharing commands read it.
+    enabled: true
+    # -- The largest number of bytes that the archive keeps.
+    maxBytes: 67108864
   # -- TOML text that the chart adds to the end of `aegis.toml`. Use it for tables that
   # the values do not have, for example `[[sources]]`, `[model.providers.local]`, and
   # `[response.webhook]`. Do not put a secret here.

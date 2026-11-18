@@ -381,7 +381,7 @@ root of the repository.
 
    ```text
      rule_pack: aegis-identity
-     rules: 10
+     rules: 12
    ```
 
 4. Write test events to the file `/tmp/aegis-pack/test-events.jsonl`, one event in each
@@ -446,7 +446,8 @@ stay. The `aegis` program has no command that calls these functions.
 
 ## The pack that AEGIS ships
 
-The pack `detections/aegis-identity` has nine rules for attacks on identity systems.
+The pack `detections/aegis-identity` has 11 rules: nine rules for attacks on identity
+systems, and two rules for contact with a decoy.
 
 | Rule file | Level | ATT&CK | Finds |
 | --- | --- | --- | --- |
@@ -459,9 +460,42 @@ The pack `detections/aegis-identity` has nine rules for attacks on identity syst
 | `privileged_application_permission_granted.yml` | medium | T1098.003 | A privileged application permission that a person granted. |
 | `privileged_role_assigned_by_workload_identity.yml` | high | T1098.003 | A privileged role that a workload identity assigned. |
 | `user_created_by_workload_identity.yml` | medium | T1136.003 | A user account that a workload identity created. |
+| `decoy_contact.yml` | low | T1595 | A client that contacted a decoy. The tenth contact of one client in 10 minutes is `high`. |
+| `decoy_canary_hit.yml` | high | T1595 | A client that followed the canary instruction of a decoy. |
 
 The velocity detectors and the honeytoken detector are a part of the engine, not of the
-pack. Refer to [architecture.md](architecture.md#the-two-detection-tiers).
+pack. Refer to [architecture.md](architecture.md#the-two-detection-tiers). Refer to
+[deception.md](deception.md) for the decoy service.
+
+### Suppression
+
+A rule that an attacker with no access can match in any number has the top-level key
+`aegis.suppress`. The rule and one key then give one detection in a window. The engine
+counts each other match and makes no detection for it.
+
+```yaml
+aegis.suppress:
+  window_seconds: 600
+  fields:
+    - actor.ip
+    - client_fingerprint
+  repeat:
+    count: 10
+    level: high
+```
+
+- `fields` are the event fields that make the key. With no `fields`, the key is the
+  entities of the detection.
+- `repeat` gives one more detection when the count of matches in one window reaches
+  `count`. Its rule identifier is the identifier of the rule and `:repeated`.
+- The rules `account_locked_after_failed_sign_ins.yml`, `mfa_request_denied.yml`,
+  `legacy_mail_protocol_sign_in.yml`, and the two decoy rules have this key.
+- An indicator can have the key `suppress_seconds`, with the same effect for one value
+  and one actor.
+
+A suppressed match gives no detection, so its target is not in an incident. Put the
+target in `fields` if each target must give a detection. The README of
+[`aegis-detect`](../crates/detect/README.md#flood-protection) has the details.
 
 ## Limits
 

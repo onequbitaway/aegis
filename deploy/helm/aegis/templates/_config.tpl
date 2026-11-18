@@ -84,9 +84,22 @@ playbooks = {{ .Values.config.response.playbooks | quote }}
 {{- with .Values.config.response.playbookDir }}
 playbook_dir = {{ . | quote }}
 {{- end }}
+{{- if .Values.config.response.timedRevert }}
+
+# The timed revert: the file holds the pending reverts, so a restart does not lose them.
+[response.revert]
+store = "/var/lib/aegis/pending-reverts.json"
+{{- end }}
 
 [ingest]
 checkpoint_dir = "/var/lib/aegis/checkpoints"
+{{- if .Values.config.evidence.enabled }}
+
+# The evidence archive for the sharing commands.
+[evidence]
+path = "/var/lib/aegis/evidence.jsonl"
+max_bytes = {{ int64 .Values.config.evidence.maxBytes }}
+{{- end }}
 {{- if .Values.plugins.enabled }}
 
 [plugins]

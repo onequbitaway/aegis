@@ -12,6 +12,9 @@ The examples use the starter directory of the [quickstart](quickstart.md),
 - [Start and stop the service](#start-and-stop-the-service)
 - [The audit log](#the-audit-log)
 - [Approvals](#approvals)
+- [Timed reverts](#timed-reverts)
+- [The decoy service](#the-decoy-service)
+- [Flood protection](#flood-protection)
 - [Apply a change of the rules, the policy, or the playbooks](#apply-a-change-of-the-rules-the-policy-or-the-playbooks)
 - [What a restart keeps](#what-a-restart-keeps)
 - [Upgrades](#upgrades)
@@ -38,7 +41,7 @@ The examples use the starter directory of the [quickstart](quickstart.md),
    work that is in progress. The server waits for each approval decision that started.
 
    ```text
-   AEGIS stopped. Events examined: 648. Detections: 8. Incident changes: 7. Playbook runs: 4.
+   AEGIS stopped. Events examined: 648. Detections: 9. Incident changes: 7. Playbook runs: 4.
    ```
 
 - The exit status is 0 after a stop signal. It is 1 if a component failed.
@@ -75,7 +78,7 @@ aegis audit verify --path /tmp/aegis-quickstart/data/audit.jsonl
 
 ```text
 Audit log /tmp/aegis-quickstart/data/audit.jsonl
-  Records checked: 162
+  Records checked: 163
   Chain: valid
 ```
 
@@ -93,7 +96,7 @@ curl -s -H "Authorization: Bearer $AEGIS_TOKEN_ALICE" \
 ```
 
 ```json
-{"valid":true,"checked":162}
+{"valid":true,"checked":163}
 ```
 
 ### What the check finds
@@ -125,10 +128,10 @@ A last line that is not complete:
 
 ```text
 Audit log /tmp/aegis-audit-test/partial.jsonl
-  Records checked: 155
+  Records checked: 156
   Chain: NOT VALID
-  First invalid sequence: 156
-  Reason: the last line is not complete: 20 bytes at byte offset 210897 have no line end. A write that did not complete can cause this. The log does not repair the file
+  First invalid sequence: 157
+  Reason: the last line is not complete: 21 bytes at byte offset 218508 have no line end. A write that did not complete can cause this. The log does not repair the file
 ```
 
 The service does not start with an audit file that does not verify:
@@ -163,11 +166,11 @@ aegis audit show --path /tmp/aegis-quickstart/data/audit.jsonl --limit 3
 ```
 
 ```text
-Audit log /tmp/aegis-quickstart/data/audit.jsonl: the newest 3 of 162 records
-    160  2026-11-18T06:56:56.837262Z  agent_decision      reporter              The model wrote no report text for incident 508657f7-d921-8cb3-add4-c2bd62528abd: the model call failed: unavailable: no model is configured: add a [model] section to use a model. The template applies.
-    161  2026-11-18T06:56:56.841218Z  agent_decision      reporter              Wrote the report for incident 508657f7-d921-8cb3-add4-c2bd62528abd on aegis.reports.508657f7-d921-8cb3-add4-c2bd62528abd. Text source: template.
-    162  2026-11-18T06:56:58.797036Z  approval_decided    alice@example.com     alice@example.com rejected the action disable_service_principal on sp-sync-helper.
-  Records checked: 162
+Audit log /tmp/aegis-quickstart/data/audit.jsonl: the newest 3 of 163 records
+    161  2026-11-18T20:01:27.484357Z  agent_decision      responder             Incident 508657f7-d921-8cb3-add4-c2bd62528abd: Containment is not complete. Of 6 actions: 0 ran, 5 were dry runs, 0 wait for approval, 1 were denied, 0 failed. The incident stays open.
+    162  2026-11-18T20:01:27.493122Z  agent_decision      reporter              The model wrote no report text for incident 508657f7-d921-8cb3-add4-c2bd62528abd: the model call failed: unavailable: no model is configured: add a [model] section to use a model. The template applies.
+    163  2026-11-18T20:01:27.497291Z  agent_decision      reporter              Wrote the report for incident 508657f7-d921-8cb3-add4-c2bd62528abd on aegis.reports.508657f7-d921-8cb3-add4-c2bd62528abd. Text source: template.
+  Records checked: 163
   Chain: valid
 ```
 
@@ -183,21 +186,22 @@ permission `view_audit` can read it:
 
 ```sh
 curl -s -H "Authorization: Bearer $AEGIS_TOKEN_ALICE" \
-    http://127.0.0.1:8080/api/v1/actions/01a1ed46-d037-72c6-9071-953c8ae68626/explanation
+    http://127.0.0.1:8080/api/v1/actions/01a1f03f-f941-7573-9c91-14ab8140fc74/explanation
 ```
 
 The answer has the full records. This table shows the sequence, the type, the actor, and
-the summary of each record of one answer:
+the summary of each record of one answer. The action of this example came from a
+playbook, so the list also has the record of the playbook run:
 
 | Sequence | Type | Actor | Summary |
 | --- | --- | --- | --- |
-| 51 | `agent_decision` | `responder` | The responder agent proposed disable_service_principal on service_principal:sp-sync-helper |
-| 54 | `action_proposed` | `responder` | responder proposed the action disable_service_principal on service_principal sp-sync-helper. |
-| 57 | `policy_decision` | `dispatcher` | Policy requires approval for the action disable_service_principal on service_principal sp-sync-helper. |
-| 60 | `approval_requested` | `dispatcher` | The action disable_service_principal on service_principal sp-sync-helper waits for the approval 01a1ed46-d067-739b-8342-0d0a6b386658. |
-| 155 | `approval_decided` | `alice@example.com` | alice@example.com approved the action disable_service_principal on sp-sync-helper. |
-| 156 | `policy_decision` | `dispatcher` | Policy requires approval for the action disable_service_principal on service_principal sp-sync-helper. |
-| 157 | `action_executed` | `dispatcher` | Connector simulation simulated the action disable_service_principal on service_principal sp-sync-helper. This was a dry run. Nothing changed. |
+| 63 | `action_proposed` | `playbook-engine` | playbook-engine proposed the action disable_service_principal on service_principal sp-sync-helper. |
+| 67 | `policy_decision` | `dispatcher` | Policy requires approval for the action disable_service_principal on service_principal sp-sync-helper. |
+| 70 | `approval_requested` | `dispatcher` | The action disable_service_principal on service_principal sp-sync-helper waits for the approval 01a1f03f-f957-730f-9f8d-a98f6e22431a. |
+| 113 | `other` | `playbook-engine` | The playbook contain-rogue-service-principal ran for the incident 508657f7-d921-8cb3-add4-c2bd62528abd in the mode dry_run: 8 requests, 0 failures. |
+| 156 | `approval_decided` | `alice@example.com` | alice@example.com approved the action disable_service_principal on sp-sync-helper. |
+| 157 | `policy_decision` | `dispatcher` | Policy requires approval for the action disable_service_principal on service_principal sp-sync-helper. |
+| 158 | `action_executed` | `dispatcher` | Connector simulation simulated the action disable_service_principal on service_principal sp-sync-helper. This was a dry run. Nothing changed. |
 
 The route `GET /api/v1/incidents/{id}/explanation` gives the records of one incident and
 of each action of that incident. The incident page of the console shows them.
@@ -209,7 +213,7 @@ sequence number and the hash of the last record in a different system at regular
 intervals. The route `GET /api/v1/status` gives them:
 
 ```json
-"audit":{"head":{"sequence":154,"hash":"1968d4da2ef558c0e6416ccda919767b77c12a34c7f63214f7d009092afe5139","time":"2026-11-18T06:10:03.833556Z"}}
+"audit":{"head":{"sequence":163,"hash":"0f6878e1a586b9877ab53508a9a0eaed9673199086beb21b66f305ed57a4195a","time":"2026-11-18T20:01:27.497291Z"}}
 ```
 
 After a restart, make sure that the log still has that record with that hash.
@@ -272,12 +276,57 @@ A program that uses the `aegis-app` library can call `App::reload`. That functio
 the three parts again with no restart, keeps the old state if a file is not valid, and
 writes a `config_change` record.
 
+## Timed reverts
+
+A containment action with a revert time runs first. AEGIS reverts it at that time, unless
+a person confirms it. Refer to [response.md](response.md).
+
+- List the pending reverts with `aegis reverts list`, or in the view **Approvals** of the
+  console. The commands call the operator API of the running service.
+- Confirm an action to keep it: `aegis reverts confirm <ACTION_ID>`.
+- Move the time: `aegis reverts extend <ACTION_ID> --by 2h`.
+- Revert an action now: `aegis reverts cancel <ACTION_ID>`.
+- Each decision needs the permission `approve_actions`, and the audit log gets the
+  principal.
+- With the default policy, each revert needs approval. A timed revert then waits in the
+  approval queue, and the containment stays until a person decides.
+- Run one service for one revert store file.
+
+## The decoy service
+
+The `[decoy]` section starts a decoy with `aegis run`. Refer to
+[deception.md](deception.md).
+
+- The field `decoy` of `GET /api/v1/status` shows the address and the counters.
+- `events_dropped` larger than 0 shows that the event queue of the decoy was full.
+- A contact with the decoy is a `suspicious` detection. A canary hit and a decoy key are
+  `malicious`.
+- The decoy stops with the service.
+
+## Flood protection
+
+An attacker can send events only to make AEGIS work. The field `flood` of
+`GET /api/v1/status` shows what the limits did:
+
+| Counter | Meaning |
+| --- | --- |
+| `suppressed_matches` | Rule and indicator matches that gave no detection. |
+| `repeat_detections` | Detections for a rule that matched many times for one key. |
+| `triage_quota_denials` | `suspicious` detections that got no model request. |
+| `coalesced_incident_updates` | Incident states that a newer state of the same incident replaced. |
+
+A counter that grows fast shows a flood. Examine the source of the events. Refer to
+[configuration.md](configuration.md#detection) for the limits.
+
 ## What a restart keeps
 
 | Data | Memory storage | PostgreSQL storage |
 | --- | --- | --- |
 | Incidents, the Defensive Graph, the approval queue | Gone | Kept |
 | The audit log | Kept, in the file | Kept |
+| The pending timed reverts | Kept, in the file of `response.revert.store` | The same |
+| The evidence archive | Kept, in the file of `evidence.path` | The same |
+| The events of the decoy that the engine did not examine | Gone | Gone |
 | The position of each source | Kept, if `ingest.checkpoint_dir` is set | Kept, if `ingest.checkpoint_dir` is set |
 | Messages on the bus | Gone with the memory bus. Kept with NATS JetStream. | The same |
 | The state of the velocity detectors and of the correlator | Gone | Gone |
@@ -289,6 +338,10 @@ Effects that you must know:
 - After a restart, the correlator starts an incident again with only the new detections.
   The incident store keeps the old detections.
 - After a restart, a playbook can run a second time for an old incident.
+- After a restart, the revert scheduler continues. A revert with a time in the past runs
+  immediately.
+- A revert store file that is not valid stops the start. Examine the file. Do not remove
+  it before you know which actions it names.
 - An approval request in the memory storage is gone after a stop. The action does not
   run.
 - Move each rotated secret to your vault before the process stops.
@@ -317,6 +370,8 @@ database URL must own the schema.
 | The configuration directory | Copy `aegis.toml`, the detection pack, the policies, and the playbooks. Keep them in version control. |
 | The file audit log | Copy the file. Then run `aegis audit verify` on the copy. |
 | The checkpoints | Copy the directory of `ingest.checkpoint_dir`. |
+| The pending timed reverts | Copy the file of `response.revert.store`. |
+| The evidence archive | Copy the file of `evidence.path` and the file with the suffix `.1`. The files hold raw log records. |
 | The PostgreSQL database | Use the backup tools of PostgreSQL, for example `pg_dump`. |
 | The NATS stream | Use the backup tools of NATS. |
 
@@ -403,6 +458,8 @@ cause to the standard error stream, and the exit status is 1.
 | ``the section `response` is not valid: key `graph`: missing field `client_secret` `` | The client secret of the Microsoft Graph connector is not set. | Set `AEGIS__RESPONSE__GRAPH__CLIENT_SECRET`. |
 | ``the section `response` is not valid: the secret of webhook connector soc-bridge must have 16 bytes or more`` | The webhook secret is too short. | Use a longer secret. |
 | ``the section `bus` is not valid: key `nats.auth`: invalid type: integer, expected a string`` | An override with only digits became a number. | Put quotation marks in the value: `'"123456"'`. |
+| ``the section `decoy` is not valid: decoy decoy-lab: the environment variable AEGIS_DECOY_SEED is not set`` | The seed variable of the decoy is not in the environment of the process. | Export the variable. Make the seed with `openssl rand -hex 32`. |
+| `the environment variable AEGIS_API_TOKEN is not set. It must hold the API token of a principal with the permission approve_actions` | An `aegis reverts` command has no token. | Export the variable, or name a different variable with `--token-env`. |
 
 ### The operator API
 
@@ -436,6 +493,12 @@ cause to the standard error stream, and the exit status is 1.
 | `failed (unsupported): unsupported: no action connector supports the action BlockIp` | Changes are permitted, and no connector does this action type. | Configure a connector for the action type. |
 | `failed (invalid_input): invalid input: the target user user-dana is in the tenant tenant-contoso; connector entra-graph manages the tenant ...` | The telemetry uses a tenant name that the Microsoft Graph connector does not know. | Add the name to `tenant_aliases`. |
 | `denied: The evaluation of the policy rule data.aegis.response.decision failed: rule conflicts with rule at ...` | Two complete policies are in `policy.paths`. | Load one policy. |
+| `the action ... has the parameter revert_after_seconds, but the dispatcher has no revert store, so it cannot keep the pending revert; the action did not run` | Changes are permitted, a step has `revert_after`, and the configuration has no `[response.revert]` table. | Add the table. Refer to [response.md](response.md#turn-the-timed-revert-on). |
+| ``the timed revert is off: the configuration has no `[response.revert]` table`` | A revert decision for a service with no revert store. | Add the table, and start the service again. |
+| ``the section `decoy` is not valid: bind is 127.0.0.1:8080, which is the address of the operator API (api.bind = 127.0.0.1:8080). ...`` | The decoy and the operator API have one address. | Give the decoy a different port, and prefer a different network interface. |
+| ``the section `share` has no `operator_networks`. ... AEGIS wrote no document`` | A sharing command has no network of your organization. | Add `operator_networks` to the `[share]` section. Refer to [sharing.md](sharing.md#the-share-section). |
+| `cannot use the API token of the environment variable AEGIS_API_TOKEN: the API URL uses http for a host that is not a loopback address. ...` | An `aegis reverts` command would send the token with no encryption. | Use an `https` address, or run the command on the host of the service. |
+| ``the operator API at http://127.0.0.1:8080 did not answer: error sending request. Make sure that the service runs with the module `api` `` | No service listens on the address of `--url`. | Start the service with the module `api`, or give the correct address. |
 | `tier 2 failed; the detection stays suspicious ... error=timeout: provider local did not answer in 300s` | The model did not answer in time. | Use a faster model, or increase the time limits. |
 | `error: cannot write the report to the standard output stream: Broken pipe (os error 32)` | The reader of the output closed early, for example `head`. | Use a reader that reads all lines, for example `sed -n 1,20p`. |
 
@@ -456,8 +519,11 @@ cause to the standard error stream, and the exit status is 1.
 - `aegis audit verify` and `aegis audit show` read only a file audit log. For the
   PostgreSQL audit log, use the API.
 - No command and no API route shows an incident report.
-- No command and no API route undoes an action.
+- The `aegis reverts` commands need a running service with the module `api`. No command
+  changes the revert store file directly.
+- The sharing commands write files. AEGIS sends no document.
 - The service has no metrics endpoint. The route `GET /api/v1/status` gives the counts of
-  the agent runtime.
+  the agent runtime, the flood protection, the timed reverts, the evidence archive, and
+  the decoy.
 - The components make no trace spans.
 - A restore of a database backup was not tested for this document.

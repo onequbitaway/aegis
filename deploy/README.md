@@ -42,16 +42,19 @@ The build argument `AEGIS_FEATURES` selects the Cargo features of the binary.
 
 | Function | Image `full` | Image `monitoring-only` |
 | --- | --- | --- |
-| Cargo features of `aegis-cli` | `postgres`, `plugins`, `otlp`, `api` (the defaults) | None (`--no-default-features`) |
+| Cargo features of `aegis-cli` | `postgres`, `plugins`, `otlp`, `api`, `decoy` (the defaults) | None (`--no-default-features`) |
 | Ingestion, detection, agents, playbooks, policy | Yes | Yes |
 | In-process bus and in-memory storage | Yes | Yes |
 | NATS JetStream bus | Yes | Yes |
 | File audit log | Yes | Yes |
+| Timed revert, evidence archive, and the sharing commands | Yes | Yes |
 | Models (OpenAI-compatible and Anthropic adapters) | Yes | Yes |
 | PostgreSQL storage and PostgreSQL audit log | Yes | No |
 | WebAssembly connector plugins | Yes | No |
 | OpenTelemetry trace export | Yes | No |
 | Operator API, web console, and ChatOps | Yes | No |
+| The commands `aegis reverts` (a client of the operator API) | Yes | No |
+| Decoy service (the `[decoy]` section) | Yes | No |
 | gRPC services (Cargo feature `grpc`) | No | No |
 
 The modules of the configuration select the subsystems that a process runs. The Cargo
@@ -246,7 +249,7 @@ one time. It makes one critical incident and runs the playbooks as dry runs.
 
 | Service | Image | Data | Network |
 | --- | --- | --- | --- |
-| `aegis` | The full image | Volume `aegis-data`: the audit log and the checkpoints | `backplane` and `edge`. Port 8080 on `127.0.0.1` of the host. |
+| `aegis` | The full image | Volume `aegis-data`: the audit log, the checkpoints, the pending timed reverts, and the evidence archive | `backplane` and `edge`. Port 8080 on `127.0.0.1` of the host. |
 | `postgres` | `docker/postgres` | Volume `postgres-data` | `backplane`. No port on the host. |
 | `nats` | `nats`, with JetStream and a client token | Volume `nats-data` | `backplane`. No port on the host. |
 | `ollama` | `ollama/ollama`, only with the profile `local-model` | Volume `ollama-models` | `backplane`. No port on the host. |
@@ -277,6 +280,11 @@ one time. It makes one critical incident and runs the playbooks as dry runs.
   repository as read-only directories below `/etc/aegis`. To use your own files, change
   the left side of these lines in `compose.yaml`.
 - To read your own sources, replace the `[[sources]]` table in `aegis.toml`.
+- `aegis.toml` has the tables `[response.revert]` and `[evidence]`. Their files are in the
+  volume `aegis-data`. Refer to [`docs/response.md`](../docs/response.md) and
+  [`docs/sharing.md`](../docs/sharing.md).
+- The stack runs no decoy and publishes no decoy port. Refer to
+  [`docs/deception.md`](../docs/deception.md) before you add the `[decoy]` section.
 - To let AEGIS change your environment, read the README files of `aegis-app`,
   `aegis-respond`, and `aegis-policy` first. Then change `dry_run` and `playbooks` in the
   `[response]` and `[agents]` sections.
@@ -416,7 +424,7 @@ The chart `helm/aegis` runs one AEGIS process as a Deployment.
 | ConfigMap `aegis-starter` | The starter files: the default policy, the detection pack `aegis-identity`, and the sample playbooks. |
 | ServiceAccount | It has no role. The pod gets no token. |
 | Service | The operator API, as `ClusterIP`. |
-| PersistentVolumeClaim | `/var/lib/aegis`: the audit log and the checkpoints. |
+| PersistentVolumeClaim | `/var/lib/aegis`: the audit log, the checkpoints, the pending timed reverts, and the evidence archive. |
 | NetworkPolicy | Permits connections to the operator API, DNS queries, and the egress rules of the values. |
 | Ingress | Optional. The default is off. |
 
@@ -467,6 +475,8 @@ archive that has copies of these files and needs no checkout.
 | `bus.kind` | `memory` | `memory` or `nats`. |
 | `config.response.dryRun`, `config.agents.dryRun` | `true` | With `true`, each action is a dry run. |
 | `config.response.playbooks` | `dry_run` | `off`, `dry_run`, or `live`. |
+| `config.response.timedRevert` | `true` | Keep the pending timed reverts in `/var/lib/aegis/pending-reverts.json`. With `false`, an action with a revert time runs only as a dry run. |
+| `config.evidence.enabled`, `config.evidence.maxBytes` | `true`, `67108864` | The evidence archive in `/var/lib/aegis/evidence.jsonl`, and its size limit. |
 | `config.starterFiles` | `true` | Put the starter files in `/etc/aegis`. |
 | `config.extraToml` | Empty | More tables for `aegis.toml`, for example `[[sources]]` and `[model.providers.local]`. |
 | `config.aegisToml` | Empty | The full text of `aegis.toml`. It replaces the file that the chart makes. |
@@ -675,6 +685,9 @@ Do these tasks before you use a package for production:
   a person leaves.
 - **Backups.** Make backups of the PostgreSQL database and of the audit log. Keep a copy
   of the audit log on a different system.
+- **The data volume.** `/var/lib/aegis` also holds the pending timed reverts and the
+  evidence archive. The archive holds raw log records. With `persistence.enabled` set to
+  `false`, a restart of the pod loses the pending reverts.
 - **Resources.** Set limits for memory and processor time for each Compose service. The
   chart sets them for the pod.
 - **Image updates.** Each base image has a digest. Build the images again when a base
@@ -701,6 +714,10 @@ Known limits of the packages:
 - **A published image and a published chart.** The workflow builds and tests the image.
   It pushes nothing. There is no signature and no software bill of materials.
 - **gRPC.** The images do not have the Cargo feature `grpc`.
+- **A decoy.** The Compose stack and the chart run no decoy. The chart has no value, no
+  Service, and no NetworkPolicy rule for a decoy port. To run a decoy on Kubernetes, give
+  the `[decoy]` section in `config.extraToml`, the secrets in `extraEnv`, and your own
+  Service and NetworkPolicy. This was not tested.
 - **A GPU for the model server.** The Compose file gives the model server no GPU.
 - **Metrics.** AEGIS exports traces with OpenTelemetry. The packages have no metrics
   endpoint and no dashboard.

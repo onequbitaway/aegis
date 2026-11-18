@@ -42,15 +42,18 @@ The configuration examples/device-code-phishing/aegis.toml is valid.
   api: off
   bus: memory
   connectors: honeytokens, simulation
+  decoy: off
   dispatcher_dry_run: true
+  evidence_archive: off
   model: false
   modules: ingest, detection, monitor, hunter, analyst, responder, deception, reporter
   playbook_mode: dry_run
   playbooks: contain-device-code-phishing
   rule_pack: device-code-phishing
   rules: 2
-  sources:
+  sources: 
   storage: memory
+  timed_revert: off
 ```
 
 The check loads the pack and the playbook. A rule or a playbook that is not valid is a

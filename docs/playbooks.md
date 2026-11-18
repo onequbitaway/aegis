@@ -19,6 +19,7 @@ All playbooks are defensive. Each action changes only the environment of the ope
 - [Worked example: write and run a playbook](#worked-example-write-and-run-a-playbook)
 - [Run a playbook through the API](#run-a-playbook-through-the-api)
 - [The sample playbooks](#the-sample-playbooks)
+- [The timed revert](#the-timed-revert)
 - [Limits](#limits)
 
 ## How a playbook runs
@@ -282,7 +283,7 @@ root of the repository.
    The summary lists the new playbook:
 
    ```text
-     playbooks: block-password-spray-source, contain-compromised-user, contain-rogue-service-principal, isolate-compromised-host, report-privileged-role, respond-to-honeytoken-trip
+     playbooks: block-password-spray-source, contain-compromised-user, contain-rogue-service-principal, isolate-compromised-host, raise-friction-critical-identity-incident, report-privileged-role, respond-to-honeytoken-trip
    ```
 
 4. Examine the recorded attack log as a dry run.
@@ -353,7 +354,7 @@ curl -s -X POST -H "Authorization: Bearer $AEGIS_TOKEN_ALICE" \
 
 ## The sample playbooks
 
-The directory [`playbooks`](../playbooks/README.md) has five samples. `aegis init` copies
+The directory [`playbooks`](../playbooks/README.md) has six samples. `aegis init` copies
 them to the starter directory.
 
 | File | Use |
@@ -363,6 +364,38 @@ them to the starter directory.
 | `block-password-spray-source.yaml` | Block the address that a password spray comes from. |
 | `isolate-compromised-host.yaml` | Save the evidence of a compromised host and isolate the host. |
 | `respond-to-honeytoken-trip.yaml` | Save the evidence of a honeytoken use, block the source address, and tell the security team. |
+| `raise-friction-critical-identity-incident.yaml` | Stop user consent to applications in the tenant for 2 hours during a critical identity incident. |
+
+The friction playbook runs only for the tenants that its trigger names. Replace the
+example tenant with your tenant.
+
+## The timed revert
+
+A step with the field `revert_after` asks for a timed revert. The action runs, and AEGIS
+reverts it at that time, unless a person confirms it.
+
+```yaml
+steps:
+  - id: block-source-address
+    action: block_ip
+    target:
+      each_entity: ip_address
+    revert_after: 4h
+    reason: "Incident {{incident.id}}: block the address {{target.id}}."
+```
+
+- The value is a number of seconds, or a number with the unit `s`, `m`, `h`, or `d`. The
+  range is 1 second to 30 days.
+- Only an action with an inverse can have the field: `disable_user`,
+  `disable_service_principal`, `isolate_host`, `block_ip`, `tag`, `deploy_honeytoken`,
+  and a custom action. The loader rejects the field on each other action.
+- The engine sets the request parameter `revert_after_seconds`. The policy can read it.
+- In a dry run, the field has no effect.
+- A live step needs the table `[response.revert]` and a connector that can undo the
+  action. If not, the step fails and nothing changes.
+- The reversible containment steps of the sample playbooks have `revert_after: 4h`.
+
+Refer to [response.md](response.md) for the scheduler and for the decisions of a person.
 
 Each action needs a connector that supports it. The identity actions need the Microsoft
 Graph connector. The other actions need a webhook endpoint or a plugin for the action
@@ -376,7 +409,7 @@ type. Refer to [connectors.md](connectors.md).
   playbook can run a second time for an old incident.
 - A playbook has no condition between steps and no wait. Each step runs in sequence.
 - The dispatcher does not try a failed action again.
-- A step cannot undo the action of a step before it. The dispatcher has no path for
-  `revert`.
+- A step cannot undo the action of a step before it. A person or the timed revert
+  reverts an action. Refer to [response.md](response.md).
 - A function that makes a response plan with a model exists in `aegis-respond`. The
   `aegis` program does not use it.

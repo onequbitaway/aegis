@@ -47,15 +47,19 @@ containment. The operator owns the policy that decides each action.
 1. **Ingest.** Source connectors convert vendor telemetry to one normalized event.
 2. **Detect.** Tier 1 is deterministic: Sigma rules, indicator matches, and velocity
    detectors, with no model. Tier 2 asks a model about the detections that tier 1 marks
-   as `suspicious`.
+   as `suspicious`. A decoy service can add its contacts to the telemetry.
 3. **Correlate.** A correlator puts related detections in one incident and maps them to
    [MITRE ATT&CK][attack].
 4. **Analyze.** A Supervisor and six agents share a Defensive Graph. They assess the
    incident and propose response actions. Each agent has a deterministic path, so AEGIS
    works with no model.
 5. **Respond.** Each action goes through one path. The path has the [Rego][rego]
-   policy, an approval by a person, an action connector, and the audit log.
+   policy, an approval by a person, an action connector, and the audit log. A
+   containment action can have a revert time: AEGIS reverts it, unless a person
+   confirms it.
 6. **Record.** A hash-chained audit log records each decision and its evidence.
+7. **Share.** Commands write abuse reports and indicators for other defenders. AEGIS
+   sends nothing.
 
 ## Quickstart
 
@@ -90,7 +94,7 @@ actions, and the result of the audit check. This is a part of the output:
 ```text
 AEGIS demonstration: replay of the recorded attack log: 648 events, dry run, no model
 
-Detections (8)
+Detections (9)
   2026-11-03T09:10:00.450Z  high           malicious   T1110.003               Sign-in burst from one address  [aegis.velocity.sign_in_burst]
   2026-11-03T09:10:31.000Z  high           malicious   T1078                   Successful sign-in after a sign-in burst  [aegis.velocity.sign_in_after_burst]
   2026-11-03T09:10:37.000Z  high           malicious   T1528                   Consent to privileged application permissions  [5b0f3c2e-8a41-4d6f-9c57-2e1a7b90d314]
@@ -98,10 +102,14 @@ Detections (8)
   2026-11-03T09:10:46.000Z  high           malicious   T1098.003               Privileged role assigned by a workload identity  [a4d7e1b9-6c35-4f02-8e7a-1b9c0d5f2a63]
   2026-11-03T09:10:46.000Z  high           malicious   T1098.003               Workload identity gave itself a privileged role  [aegis.velocity.privileged_self_assignment]
   2026-11-03T09:10:52.000Z  high           malicious   T1078.004               Principal acts from two places at an impossible speed  [aegis.velocity.impossible_speed]
+  2026-11-03T09:10:52.000Z  high           malicious   T1059.009               Chain of sensitive actions at machine speed  [aegis.velocity.machine_cadence]
   2026-11-03T09:11:15.000Z  critical       malicious   T1552                   Honeytoken used  [0c9e4f7a-2b6d-4e18-a3f5-7d21c6b8e940]
 
 Incidents (1)
-  508657f7-d921-8cb3-add4-c2bd62528abd  critical       investigating   Multi-stage attack: 7 ATT&CK techniques in 8 detections
+  508657f7-d921-8cb3-add4-c2bd62528abd  critical       investigating   Multi-stage attack: 8 ATT&CK techniques in 9 detections
+      Detections: 9
+      Techniques: T1110.003, T1078, T1528, T1098.001, T1098.003, T1078.004, T1059.009, T1552
+      Entities:   ip_address 203.0.113.50; user user-dana; application app-sync-helper; service_principal sp-sync-helper; ip_address 203.0.113.51; ip_address 192.0.2.77; secret kv-prod/legacy-admin-password
 
 Actions (23)
   block_ip                    ip_address 203.0.113.50                         responder                                 executed: simulated (connector simulation)
@@ -110,8 +118,8 @@ Actions (23)
   No action changed the environment.
 
 Audit log
-  Records: 155
-  Records checked: 155
+  Records: 156
+  Records checked: 156
   Chain: valid
 ```
 
@@ -129,15 +137,18 @@ has automated tests. No external security audit was done.
 
 | Area | Function |
 | --- | --- |
-| Program | `aegis demo`, `init`, `run`, `replay`, `monitor`, `audit verify`, `audit show`, and `config check`. |
-| Sources | A JSON Lines event file. Microsoft Entra ID sign-in and directory audit logs. WebAssembly source plugins. |
-| Detection tier 1 | A subset of Sigma, indicators, four velocity detectors, and a honeytoken detector. |
+| Program | `aegis demo`, `init`, `run`, `replay`, `monitor`, `audit verify`, `audit show`, `config check`, `reverts`, `report abuse`, and `indicators export`. |
+| Sources | A JSON Lines event file. Microsoft Entra ID sign-in and directory audit logs. WebAssembly source plugins. The decoy service. |
+| Detection tier 1 | A subset of Sigma, indicators, six velocity and behavior detectors, and a honeytoken detector. |
 | Detection tier 2 | Model triage of `suspicious` detections, with strict validation of each answer. |
+| Flood protection | Suppression for each rule, a quota for tier 2, and a limit on the states of one incident. |
+| Deception | A decoy service with a tarpit, a maze, a decoy model API, and a canary instruction for automated agents. |
 | Correlation | Detections to incidents, with ATT&CK techniques and a severity. |
 | Agents | Supervisor, Monitor, Hunter, Analyst, Responder, Deception, and Reporter. Each works with no model. |
 | Models | Adapters for the OpenAI chat-completions format and for the Anthropic Messages API. A router with routes, fallback, and token budgets. |
-| Response | One dispatcher: Rego policy, approval queue, connector, audit. YAML playbooks with a dry-run mode. |
-| Action connectors | Microsoft Graph identity actions. Signed webhooks. WebAssembly action plugins. A honeytoken registry. |
+| Response | One dispatcher: Rego policy, approval queue, connector, audit. YAML playbooks with a dry-run mode. The revert of an action, and the timed revert. |
+| Action connectors | Microsoft Graph identity actions. Signed webhooks. WebAssembly action plugins. A honeytoken registry. Two friction actions. |
+| Sharing | Abuse reports with an evidence manifest. Indicators as STIX 2.1, as CSV, and as an indicator file for a rule pack. |
 | Policy and audit | Rego policy in the process, role-based access control, approval rules, and a hash-chained audit log in a file or in PostgreSQL. |
 | Storage | In memory, or PostgreSQL with Apache AGE and pgvector. |
 | Bus | In the process, or NATS JetStream. |
@@ -147,6 +158,7 @@ These functions were also run by hand for the documents:
 
 - All commands of the program.
 - The service with the web console and an approval.
+- The decoy service on a loopback address, with a canary hit and a decoy key.
 - The memory storage, the PostgreSQL storage, and the NATS bus.
 - The example plugins.
 - A local model on an Ollama server.
@@ -157,6 +169,8 @@ These functions have only the automated tests, which use mock servers:
 - The Anthropic adapter.
 - The delivery of a webhook.
 - Slack and Teams.
+- The friction action `restrict_user_consent` against Microsoft Graph.
+- A timed revert with a real connector. The tests use a recording connector.
 
 ### What is not done
 
@@ -167,12 +181,15 @@ These functions have only the automated tests, which use mock servers:
   at the start. A change needs a restart.
 - **No access to reports.** The Reporter agent publishes each incident report on the
   bus. No command and no API route shows it.
-- **No undo.** A connector can undo an action, but no command and no API route calls
-  that function.
+- **The revert has limits.** Only an action type with an inverse can be reverted, and
+  only if its connector can undo it. One process uses one revert store.
+- **No sending.** The sharing commands write files. AEGIS sends no report and no
+  indicator. The decoy has no TLS.
 - **No TLS in the API server.** The server listens on a loopback address. For other
   access, put a proxy with TLS before it.
 - **Some state is in memory.** The state of the velocity detectors and the honeytoken
-  registry do not continue after a restart.
+  registry do not continue after a restart. The events of a decoy are in memory until
+  the detection engine examines them.
 - **Parts that the program does not use.** The vector store and a function that makes a
   response plan with a model exist in the libraries.
 - **Not in the default build.** gRPC is a Cargo feature that is off by default.
@@ -187,7 +204,7 @@ One process holds all components. A configuration file selects the components th
 
 ```mermaid
 flowchart TD
-    sources["Telemetry of the operator<br/>event files, Microsoft Entra ID, source plugins"]
+    sources["Telemetry of the operator<br/>event files, Microsoft Entra ID, source plugins, decoy service"]
     ingest["Ingestion runners<br/>source connectors, normalized events, checkpoints"]
     bus[("Message bus<br/>in-process or NATS JetStream")]
     tier1["Detection tier 1<br/>Sigma rules, indicators, velocity detectors"]
@@ -198,7 +215,7 @@ flowchart TD
     playbooks["Playbook engine"]
     models["Model router<br/>provider adapters, routes, budgets"]
     stores[("Stores<br/>incidents, Defensive Graph, approvals")]
-    dispatcher{"Dispatcher<br/>policy, approval, connector"}
+    dispatcher{"Dispatcher<br/>policy, approval, connector, timed revert"}
     connectors["Action connectors<br/>Microsoft Graph, webhook, action plugins"]
     audit[("Audit log<br/>hash chain")]
     api["Operator API<br/>REST, web console, ChatOps"]
@@ -258,10 +275,12 @@ All crates are in `crates/`. A crate talks to a different subsystem only through
 | [`aegis-core`](crates/core/README.md) | The configuration, the log, the module set, and the shutdown signal. |
 | [`aegis-ingest`](crates/ingest/README.md) | Source connectors, the ingestion runner, and checkpoints. |
 | [`aegis-bus`](crates/bus/README.md) | The message bus: NATS JetStream, or a bus in the process. |
-| [`aegis-detect`](crates/detect/README.md) | Sigma rules, indicators, velocity detectors, model triage, and the correlator. |
+| [`aegis-detect`](crates/detect/README.md) | Sigma rules, indicators, velocity detectors, model triage, flood protection, and the correlator. |
+| [`aegis-decoy`](crates/decoy/README.md) | The decoy service: a tarpit, a maze, a decoy model API, and a canary instruction. |
 | [`aegis-model`](crates/model/README.md) | Model provider adapters and the model router. |
 | [`aegis-agents`](crates/agents/README.md) | The agent runtime and the seven agents. |
-| [`aegis-respond`](crates/respond/README.md) | The dispatcher, the action connectors, the playbook engine, and honeytokens. |
+| [`aegis-respond`](crates/respond/README.md) | The dispatcher, the revert scheduler, the action connectors, the playbook engine, and honeytokens. |
+| [`aegis-share`](crates/share/README.md) | Abuse reports, and indicators as STIX 2.1 and as CSV. The crate makes documents only. |
 | [`aegis-policy`](crates/policy/README.md) | The Rego policy engine, access control, the approval service, and the file audit log. |
 | [`aegis-storage`](crates/storage/README.md) | PostgreSQL stores for the graph, the incidents, the audit log, and the approvals. |
 | [`aegis-memory`](crates/memory) | Stores in the memory of the process. |
@@ -283,6 +302,9 @@ All crates are in `crates/`. A crate talks to a different subsystem only through
 | [docs/detection-packs.md](docs/detection-packs.md) | How to write and test detection rules. |
 | [docs/playbooks.md](docs/playbooks.md) | How to write playbooks. |
 | [docs/policy.md](docs/policy.md) | How to write the response policy. |
+| [docs/response.md](docs/response.md) | The revert of an action, the timed revert, and the friction actions. |
+| [docs/deception.md](docs/deception.md) | The decoy service: its personas, its placement, its safety rules, and its limits. |
+| [docs/sharing.md](docs/sharing.md) | Abuse reports and indicators for other defenders, and the evidence archive. |
 | [docs/operations.md](docs/operations.md) | How to operate the service, and troubleshooting. |
 | [docs/security.md](docs/security.md) | The hardening checklist and the tested security properties. |
 | [examples](examples/README.md) | Configuration sets that you can run. |
@@ -321,6 +343,9 @@ For deployment in containers, refer to [`deploy/README.md`](deploy/README.md).
 - This project does not write or distribute offensive, exploitation, or counter-attack
   modules. This rule includes payloads, stubs, and examples.
 - AEGIS only reads the telemetry of the operator. It does not scan or probe a system.
+- A decoy only answers a client that connects to it, on an address of the operator. It
+  slows and misleads that client. It never damages the client.
+- The sharing commands write documents. AEGIS sends nothing to a different organization.
 - A response action changes only the environment of the operator, through the
   administrative interface of the product.
 - The operator owns the policy that controls each action.

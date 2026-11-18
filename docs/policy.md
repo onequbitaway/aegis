@@ -17,6 +17,7 @@ the tiers, approvals, and role-based access control. It ends with worked policie
 - [Approvals](#approvals)
 - [Role-based access control](#role-based-access-control)
 - [The policies that AEGIS ships](#the-policies-that-aegis-ships)
+- [The policy for a revert](#the-policy-for-a-revert)
 - [Worked example: write and test a policy](#worked-example-write-and-test-a-policy)
 - [Examine a policy](#examine-a-policy)
 - [Apply a changed policy](#apply-a-changed-policy)
@@ -244,6 +245,7 @@ The Rego policy can read the roles of the principal that makes a request, in
 | [`policies/examples/auto_contain_service_principals.rego`](../policies/examples/auto_contain_service_principals.rego) | The default behavior, and containment of a service principal runs with no approval when the incident is critical. |
 | [`policies/examples/maintenance_window.rego`](../policies/examples/maintenance_window.rego) | The default behavior, but each change is denied in a maintenance window. |
 | [`policies/examples/protected_entities.rego`](../policies/examples/protected_entities.rego) | The default behavior, but only a person with the role `incident_commander` can request a change to a protected entity. |
+| [`policies/examples/contain_first_with_timed_revert.rego`](../policies/examples/contain_first_with_timed_revert.rego) | The default behavior, and a reversible action with a short revert time runs first. The revert scheduler reverts it with no approval. |
 | [`examples/offline-demo/policies/approval-rehearsal.rego`](../examples/offline-demo/policies/approval-rehearsal.rego) | The default behavior, but one action type needs approval also in a dry run. |
 
 The comments at the top of each file tell you how to change it.
@@ -288,6 +290,52 @@ else := {
 
 The `else` chain gives the rules a sequence. The first rule that matches makes the
 decision.
+
+## The policy for a revert
+
+A revert is a request of its own. The policy decides it as each other request.
+
+| Input | Value for a revert |
+| --- | --- |
+| `input.action.kind` | `{"custom": "revert"}` |
+| `input.action.target` | The target of the action that the revert undoes. |
+| `input.action.parameters.reverts` | `action_id`, `kind`, `requested_by`, `connector`, `executed_at`, and `revert_after_seconds` if the action had a revert time. |
+| `input.principal` | The person who requests the revert, or the revert scheduler: `id` is `revert-scheduler`, and `kind` is `system`. |
+| `input.default_tier` | `gated` |
+
+An action with a revert time has the parameter `revert_after_seconds`. A policy can
+permit such an action with no approval. These rules are a part of
+`policies/examples/contain_first_with_timed_revert.rego`:
+
+```rego
+has_short_revert if {
+	seconds := input.action.parameters.revert_after_seconds
+	is_number(seconds)
+	seconds >= 1
+	seconds <= max_revert_after_seconds
+}
+
+contain_first if {
+	is_contain_first_action
+	has_short_revert
+	input.incident.severity in urgent_severities
+}
+
+timed_revert if {
+	input.action.kind.custom == "revert"
+	input.principal.kind == "system"
+	input.principal.id == revert_scheduler
+	is_number(input.action.parameters.reverts.revert_after_seconds)
+}
+```
+
+- With `policies/default.rego`, each revert needs the approval of a person. The timed
+  revert of the scheduler then waits in the approval queue, and the containment stays.
+- `policies/examples/contain_first_with_timed_revert.rego` is a complete policy for
+  "contain first". Its comments tell you how to change it.
+- The four-eyes rule applies: the person who requests a revert cannot approve it.
+
+Refer to [response.md](response.md).
 
 ## Worked example: write and test a policy
 
@@ -527,8 +575,8 @@ use. The `aegis` program has no command that calls this function.
   no state.
 - The policy cannot call a network service. The functions `http.send`,
   `net.lookup_ip_addr`, and `opa.runtime` do not exist in this engine.
-- The policy and an approval request cannot tell a `revert` from the first action. The
-  dispatcher has no path for `revert`.
+- A revert has the action type `{custom: revert}` for each action that it undoes. The
+  policy reads the type of that action from `input.action.parameters.reverts.kind`.
 - The dispatcher does not try a failed action again.
 - The approval queue of the memory storage does not continue after a stop.
 - `aegis config check` does not find two complete policies that conflict. The conflict

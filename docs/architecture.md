@@ -28,7 +28,7 @@ components that run.
 
 ```mermaid
 flowchart TD
-    sources["Telemetry of the operator<br/>event files, Microsoft Entra ID, source plugins"]
+    sources["Telemetry of the operator<br/>event files, Microsoft Entra ID, source plugins, decoy service"]
     ingest["Ingestion runners<br/>source connectors, normalized events, checkpoints"]
     bus[("Message bus<br/>in-process or NATS JetStream")]
     tier1["Detection tier 1<br/>Sigma rules, indicators, velocity detectors"]
@@ -39,7 +39,7 @@ flowchart TD
     playbooks["Playbook engine"]
     models["Model router<br/>provider adapters, routes, budgets"]
     stores[("Stores<br/>incidents, Defensive Graph, approvals")]
-    dispatcher{"Dispatcher<br/>policy, approval, connector"}
+    dispatcher{"Dispatcher<br/>policy, approval, connector, timed revert"}
     connectors["Action connectors<br/>Microsoft Graph, webhook, action plugins"]
     audit[("Audit log<br/>hash chain")]
     api["Operator API<br/>REST, web console, ChatOps"]
@@ -81,10 +81,12 @@ through the contracts of `aegis-contracts`.
 | Platform | `aegis-core` | The configuration file, environment overrides, the log and the trace exporter, the module set, and the shutdown signal. |
 | Sensor and ingest | `aegis-ingest` | Source connectors, the ingestion runner, and checkpoints. |
 | Stream bus | `aegis-bus` | The message bus: NATS JetStream, or a bus in the process. |
-| Detection and correlation | `aegis-detect` | Sigma rules, indicators, velocity detectors, model triage, and the correlator. |
+| Detection and correlation | `aegis-detect` | Sigma rules, indicators, velocity detectors, model triage, flood protection, and the correlator. |
+| Deception | `aegis-decoy` | The decoy service: a tarpit, a maze, a decoy model API, and a canary instruction. |
 | Model abstraction | `aegis-model` | Provider adapters and the model router. |
 | Agent runtime | `aegis-agents` | The Supervisor, six agents, and their guard rails. |
-| Response and actuation | `aegis-respond` | The dispatcher, the action connectors, the playbook engine, and honeytokens. |
+| Response and actuation | `aegis-respond` | The dispatcher, the revert scheduler, the action connectors, the playbook engine, and honeytokens. |
+| Sharing | `aegis-share` | Abuse reports and indicator exports. The crate makes documents only. |
 | Policy and audit | `aegis-policy` | The Rego policy engine, role-based access control, the approval service, and the file audit log. |
 | Storage | `aegis-storage`, `aegis-memory` | PostgreSQL stores, and stores in the memory of the process. |
 | Plugins | `aegis-plugin` | The sandbox for WebAssembly connector plugins. |
@@ -111,7 +113,20 @@ The steps below are the steps of the service (`aegis run`).
 6. **Respond.** The agents and the playbook engine send each action request to the one
    dispatcher. Refer to [The single dispatch path](#the-single-dispatch-path).
 7. **Operate.** The operator API reads the stores and the audit log. It sends each
-   approval decision to the dispatcher path.
+   approval decision and each revert decision to the dispatcher path.
+
+Three more parts run beside these steps:
+
+- **The decoy service.** With the `[decoy]` section, one decoy listens for clients that
+  have no permission. It is a source connector, so its events go through steps 1 to 6.
+  Refer to [deception.md](deception.md).
+- **The revert scheduler.** With the `[response.revert]` table, the scheduler reverts each
+  action with a revert time, unless a person confirms it. Each revert is a request to the
+  dispatcher. Refer to [response.md](response.md).
+- **The evidence archive.** With the `[evidence]` section, the bridge writes each
+  detection with its events to a file. The incident store writes each state of an
+  incident to the same file. The sharing commands read the file. Refer to
+  [sharing.md](sharing.md).
 
 The ingestion runner publishes a batch before it saves the cursor. After a stop between
 the two steps, the runner sends the batch again. The runner can repeat an event. It does
@@ -172,6 +187,16 @@ The velocity detectors are a part of the engine. They operate with each detectio
 | `privileged_self_assignment` | A workload identity gives a privileged role or permission to itself. |
 | `credential_after_grant` | A new application credential a short time after a consent or a permission grant. |
 | `impossible_speed` | One principal acts from two places at a speed that is not possible. |
+| `machine_cadence` | One principal or one address does a chain of different sensitive actions at a speed or a regularity that a person does not have. |
+| `endpoint_probe` | One client asks an endpoint for many paths that do not exist, or for one decoy path. |
+
+The engine also protects itself from a flood of events:
+
+- A rule can give one detection for one key in a window.
+- Tier 2 has a quota of model requests.
+- One incident has a limit on its states in a window.
+
+Refer to [configuration.md](configuration.md#detection).
 
 The correlator puts two detections in one incident when they are in the same tenant,
 share an entity, and are in one time window. The severity of an incident is the largest
@@ -257,6 +282,10 @@ Rules of the path:
   error.
 - **Routing.** The routing table selects the connector for an action type. With no line
   for the type, the first connector that supports the type does the action.
+- **Revert.** A revert is a request of its own, with the action type `{custom: revert}`.
+  It goes through the same path. One execution can be reverted one time.
+- **Timed revert.** A request with a revert time runs only if the dispatcher can keep the
+  pending revert in its store. The connector must also be able to undo the action.
 
 Refer to [policy.md](policy.md) and [playbooks.md](playbooks.md).
 
@@ -288,6 +317,12 @@ These parts are in the memory of the process with each storage option:
 - The state of the velocity detectors and of the correlator.
 - The honeytoken registry, and the receiver of rotated secrets.
 - The record of which playbook ran for which incident.
+- The events of the decoy that the detection engine did not examine.
+
+These parts are files with each storage option:
+
+- The pending timed reverts (`response.revert.store`).
+- The evidence archive (`evidence.path`).
 
 Refer to [operations.md](operations.md) for the effects of a restart.
 
@@ -299,6 +334,10 @@ Refer to [operations.md](operations.md) for the effects of a restart.
 | `aegis replay` | Detection, agents, playbooks, and the dispatcher, on one event file. No source connector. | As the configuration permits. With `--dry-run`, dry runs only. |
 | `aegis demo` | The same as `replay`, on the recorded attack log, in a new starter directory. | Dry runs only. |
 | `aegis monitor` | Ingestion, detection, and the Monitor agent, on one event file. | None. |
+| `aegis reverts` | None. The command calls the operator API of a running service. | A revert decision of a person. |
+| `aegis report abuse`, `aegis indicators export` | None. The commands read the audit log and the evidence archive. | None. They write documents. |
+
+Only `aegis run` starts the decoy service and the revert scheduler.
 
 A replay gives the same result each time for the same events and the same configuration.
 
@@ -312,6 +351,8 @@ A replay gives the same result each time for the same events and the same config
 | Plugin to host | Events, action outcomes, and HTTP requests of a plugin | The WebAssembly sandbox. Refer to [connectors.md](connectors.md#the-sandbox). |
 | Action request to the environment | A change in the environment of the operator | The dispatcher: policy, approval, audit. |
 | Operator to the API | Decisions, goals, and playbook runs | A bearer token for each principal, role-based access control, and the approval rules. |
+| Unknown client to the decoy | Requests of a client that has no permission | The decoy has hard limits for connections, sizes, and times. It opens no connection. Its events hold client text only as data. |
+| AEGIS to a different organization | Abuse reports and indicators | The commands write files and send nothing. They mask operator data and refuse to run with no operator networks. A person reads each file. |
 | Process to the files | The policy, the rule pack, the playbooks, the audit file | The permissions of the operating system. AEGIS records the policy digest in the audit log. |
 
 ## Threat model of AEGIS
@@ -418,11 +459,30 @@ control.
   correct chain. The hash chain does not prevent that. Use the external copy of the last
   hash, or the PostgreSQL audit log with an application role that can only add records.
 
+### A client of the decoy
+
+A client of the decoy controls its requests: the path, the headers, and the prompt.
+
+It can:
+
+- Cause detections and an incident for its own address. The policy then decides each
+  response action.
+- Put text in event fields that tries to instruct a model. A prompt puts this text only
+  in marked data sections.
+- Use the connections of the decoy up to the limits.
+
+It cannot:
+
+- Reach the operator API through the decoy. The two listeners have different addresses.
+- Make the decoy open a connection, call a model, or send data of the operator.
+- Use memory or time above the limits of the decoy.
+- Select a response action. Text of a client never selects an action.
+
 ### A stolen API token
 
 A token gives the permissions of the roles of its principal. A token with
-`approve_actions` can approve a gated action. The four-eyes rule stops a principal that
-approves its own request. Refer to [security.md](security.md) for the hardening steps.
+`approve_actions` can approve a gated action, confirm a timed revert, and request a
+revert. The four-eyes rule stops a principal that approves its own request. Refer to [security.md](security.md) for the hardening steps.
 
 ## Limits
 
@@ -435,6 +495,9 @@ approves its own request. Refer to [security.md](security.md) for the hardening 
   repository has no inventory connector that writes exposure data to the graph.
 - A honeytoken action records a decoy in a registry. It does not plant the decoy in a
   vault.
+- One process runs one decoy. The decoy has no TLS.
+- The revert store and the evidence archive are files. They have no PostgreSQL form.
+- The sharing commands write files. AEGIS sends no report and no indicator.
 - The Reporter agent publishes each report on the bus. No command and no API route shows
   a report.
 - The vector store exists. No agent uses embeddings.

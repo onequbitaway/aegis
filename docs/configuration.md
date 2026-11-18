@@ -37,7 +37,8 @@ The command does two steps:
    valid, it reads the files that they name: the rule pack, the policy, and the playbooks.
 2. If step 1 finds no problem, it builds the application. This step connects to the bus
    and to the database, runs the database migrations, and opens the audit log. With the
-   module `api`, it also reads each token.
+   module `api`, it also reads each token. With the `[decoy]` section, it also reads the
+   seed and each decoy key. It opens no listener.
 
 The command starts no source, no detection, no agent, and no server. The exit status is
 1 if the configuration has a problem.
@@ -50,7 +51,9 @@ For a valid configuration, the command prints a summary:
 | `api` | The address of the operator API, or `off`. |
 | `bus` | `memory` or `nats`. |
 | `connectors` | The action connectors, in priority order. |
+| `decoy` | The address of the decoy service, or `off`. |
 | `dispatcher_dry_run` | The value of `response.dry_run`. |
+| `evidence_archive` | The file of the evidence archive, or `off`. |
 | `model` | `true` if the configuration has a model. |
 | `modules` | The modules that the process runs. |
 | `playbook_mode` | The value of `response.playbooks`. |
@@ -58,6 +61,7 @@ For a valid configuration, the command prints a summary:
 | `rule_pack`, `rules` | The name of the detection pack and the number of its Sigma rules. |
 | `sources` | The names of the source connectors. |
 | `storage` | `memory` or `postgres`. |
+| `timed_revert` | The store file of the timed reverts, or `off`. |
 
 ## Environment overrides
 
@@ -115,6 +119,8 @@ variable. AEGIS reads the variable at the start.
 | The API key of a model provider | `api_key_env` in `[model.providers.<name>]` |
 | The Slack signing secret and webhook URL | `signing_secret_env`, `webhook_url_env` in `[api.chatops.slack]` |
 | The Teams secret and webhook URL | `shared_secret_env`, `webhook_url_env` in `[api.chatops.teams]` |
+| The seed of the decoy service | `seed_env` in `[decoy]` |
+| A decoy key of the decoy model API | `value_env` in `[[decoy.model_api.keys]]` |
 
 **Path 2: an environment override sets the key.** These keys hold the secret itself.
 Leave the key out of the file, and set it with an override.
@@ -155,6 +161,9 @@ configuration error: the section `response` is not valid: key `graph`: missing f
 | [`[[sources]]`](#sources) | No | The source connectors. |
 | [`[ingest]`](#ingest) | No | The checkpoints and the retry rules of the sources. |
 | [`[plugins]`](#plugins) | No | The WebAssembly connector plugins. |
+| [`[decoy]`](#decoy) | No | The decoy service. |
+| [`[evidence]`](#evidence) | No | The evidence archive for the sharing commands. |
+| [`[share]`](#share) | Only for the sharing commands | The networks of the operator, and the receivers. |
 | [`[api]`](#api) | Only with the module `api` | The operator API. |
 
 ### `[modules]`
@@ -481,6 +490,25 @@ humans_only = true
 | `velocity.impossible_speed.cross_tenant_window_seconds` | Number | `60` | The time window for two resource tenants from two places. |
 | `velocity.impossible_speed.cooldown_seconds` | Number | `900` | The time with no second detection for the same principal. |
 | `velocity.impossible_speed.max_tracked_principals` | Number | `100000` | The largest number of principals in the state. |
+| `velocity.machine_cadence.enabled` | Boolean | `true` | Switch the detector on or off. |
+| `velocity.machine_cadence.window_seconds` | Number | `300` | The time window of one chain. |
+| `velocity.machine_cadence.min_actions` | Number | `4` | The number of different actions in one chain. |
+| `velocity.machine_cadence.max_median_gap_milliseconds` | Number | `5000` | A median gap up to this value is too short for a person. |
+| `velocity.machine_cadence.max_coefficient_of_variation` | Number | `0.1` | A variation of the gaps up to this value is too regular for a person. |
+| `velocity.machine_cadence.sensitive_actions` | List | Refer to the README of `aegis-detect` | The actions that make a chain sensitive. |
+| `velocity.machine_cadence.supporting_actions` | List | `["sign_in", "api.call"]` | The other actions that are steps of a chain. |
+| `velocity.machine_cadence.follow_addresses` | Boolean | `true` | Also follow each address, for a chain of two or more principals. |
+| `velocity.machine_cadence.ignored_principals` | List | Empty | The identifiers of approved automations. |
+| `velocity.machine_cadence.cooldown_seconds` | Number | `900` | The time with no second detection for the same key. |
+| `velocity.machine_cadence.max_tracked_keys` | Number | `100000` | The largest number of keys in the state. |
+| `velocity.endpoint_probe.enabled` | Boolean | `true` | Switch the detector on or off. |
+| `velocity.endpoint_probe.window_seconds` | Number | `60` | The time window of the count. |
+| `velocity.endpoint_probe.distinct_path_threshold` | Number | `20` | Different missing paths from one client that give a detection. |
+| `velocity.endpoint_probe.missing_statuses` | List of numbers | `[404, 410]` | The HTTP statuses of a path that does not exist. |
+| `velocity.endpoint_probe.decoy_paths` | List | Empty | Paths that no approved client asks for. One request gives a detection. |
+| `velocity.endpoint_probe.decoy_path_severity` | Severity | `"medium"` | The severity of a decoy path detection. |
+| `velocity.endpoint_probe.cooldown_seconds` | Number | `900` | The time with no second detection for the same client. |
+| `velocity.endpoint_probe.max_tracked_clients` | Number | `100000` | The largest number of clients in the state. |
 | `correlator.window_seconds` | Number | `3600` | The time window that links two detections. |
 | `correlator.critical_technique_count` | Number | `3` | The number of ATT&CK techniques that makes an incident `critical`. |
 | `correlator.max_incidents` | Number | `10000` | The largest number of incidents in the state. |
@@ -491,13 +519,33 @@ humans_only = true
 | `triage.max_output_tokens` | Number | `512` | The output limit of one model request. |
 | `triage.benign_min_confidence` | Number | `0.8` | The smallest confidence with which the model can give `benign`. |
 | `triage.timeout_seconds` | Number | `60` | The time limit for one answer of the model. |
+| `triage.quota_window_seconds` | Number | `3600` | The time window of the tier 2 quota. |
+| `triage.max_requests_per_source` | Number | `120` | Model requests for the events of one source connector in one window. |
+| `triage.max_requests_per_tenant` | Number | `240` | Model requests for one tenant in one window. |
 | `triage.model` | Text | Not set | The model of tier 2. With no value, the router selects the model. |
 | `runner.durable_name` | Text | `"aegis-detect"` | The durable name of the event subscription. |
 | `runner.publish_attempts` | Number | `5` | The attempts to publish one message. |
 | `runner.publish_backoff_milliseconds` | Number | `50` | The wait before the second attempt. It doubles after that. |
+| `runner.max_incident_updates` | Number | `20` | The states of one incident that leave the engine in one window. Must be 1 or more. |
+| `runner.incident_update_window_seconds` | Number | `60` | The window of `max_incident_updates`, in event time. Must be 1 or more. |
 
 If many users share one address, for example behind a proxy, add `ip_address` to
 `correlator.unlinked_kinds`.
+
+**Flood protection.** An attacker can send events only to make AEGIS work. Three limits
+stop this:
+
+- A rule with the key `aegis.suppress` gives one detection for one key in a window. Refer
+  to [detection-packs.md](detection-packs.md#suppression).
+- `triage.max_requests_per_source` and `triage.max_requests_per_tenant` limit the model
+  requests of tier 2. Above the quota, a detection stays `suspicious`, and the engine
+  sends no request.
+- `runner.max_incident_updates` limits the states of one incident. The engine holds the
+  newest state over the limit until the window ends. The first state of an incident and
+  a state with a higher severity always leave immediately. `aegis run` and
+  `aegis replay` use this limit.
+
+`GET /api/v1/status` shows the counts of the three limits in the field `flood`.
 
 ```toml
 [detection]
@@ -531,6 +579,27 @@ cross_tenant_window_seconds = 60
 cooldown_seconds = 900
 max_tracked_principals = 100000
 
+[detection.velocity.machine_cadence]
+enabled = true
+window_seconds = 300
+min_actions = 4
+max_median_gap_milliseconds = 5000
+max_coefficient_of_variation = 0.1
+follow_addresses = true
+ignored_principals = []
+cooldown_seconds = 900
+max_tracked_keys = 100000
+
+[detection.velocity.endpoint_probe]
+enabled = true
+window_seconds = 60
+distinct_path_threshold = 20
+missing_statuses = [404, 410]
+decoy_paths = []
+decoy_path_severity = "medium"
+cooldown_seconds = 900
+max_tracked_clients = 100000
+
 [detection.correlator]
 window_seconds = 3600
 critical_technique_count = 3
@@ -544,11 +613,16 @@ max_event_bytes = 49152
 max_output_tokens = 512
 benign_min_confidence = 0.8
 timeout_seconds = 60
+quota_window_seconds = 3600
+max_requests_per_source = 120
+max_requests_per_tenant = 240
 
 [detection.runner]
 durable_name = "aegis-detect"
 publish_attempts = 5
 publish_backoff_milliseconds = 50
+max_incident_updates = 20
+incident_update_window_seconds = 60
 ```
 
 ### `[agents]`
@@ -633,6 +707,7 @@ scan_limit = 500
 | `routes` | List of `{ kind, connector }` | Empty | The connector for an action type. |
 | `graph` | Table | Not set | The Microsoft Graph action connector. |
 | `webhook` | Table | Not set | The webhook action connector. |
+| `revert` | Table | Not set | The timed revert. Refer to [`[response.revert]`](#responserevert). |
 
 Keys of `[response.graph]`:
 
@@ -731,6 +806,36 @@ timeout_seconds = 30
 
 The priority of the connectors for an action type with no route is: `graph`, `webhook`,
 the action plugins, the honeytoken connector, and the simulation connector.
+
+The simulation connector takes the built-in action types and the two friction actions,
+`{custom: restrict_user_consent}` and `{custom: raise_friction}`, as dry runs. Its
+outcome has `reversible: true` for an action type that has an inverse.
+
+#### `[response.revert]`
+
+The timed revert: a containment action with a revert time runs first, and AEGIS reverts
+it at that time unless a person confirms it. Refer to [response.md](response.md).
+
+| Key | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `enabled` | Boolean | `true` | With `false`, the table has no effect. |
+| `store` | Path | None. The key is necessary. | The file that holds the pending reverts. One process uses one file. |
+| `retry_base_seconds` | Number | `30` | The delay after the first revert attempt that fails. It doubles after each failure. |
+| `retry_max_seconds` | Number | `1800` | The longest delay between two attempts. |
+| `approval_poll_seconds` | Number | `60` | The time between two examinations of an approval that a revert waits for. |
+
+```toml
+[response.revert]
+store = "data/pending-reverts.json"
+retry_base_seconds = 30
+retry_max_seconds = 1800
+approval_poll_seconds = 60
+```
+
+- With no table, the timed revert is off. A request with a revert time that is not a dry
+  run then does not run.
+- A store file that is not valid stops the start.
+- On Unix, only the owner can read the store file.
 
 ### `[[sources]]`
 
@@ -848,6 +953,91 @@ call_timeout_seconds = 30
 max_concurrent_calls = 4
 http_timeout_seconds = 10
 require_sha256 = true
+```
+
+### `[decoy]`
+
+The decoy service: a tarpit, a maze, and a decoy model API for clients that have no
+permission. It runs in `aegis run` with the module `ingest`. Refer to
+[deception.md](deception.md). The README of
+[`aegis-decoy`](../crates/decoy/README.md#configuration) lists all keys with their
+ranges.
+
+| Key | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `id` | Text | None. The key is necessary. | The connector name of the decoy, and `decoy_id` in its events. |
+| `bind` | Address | None. The key is necessary. | The address of the listener. It must not be the address of `api.bind`. |
+| `personas` | List | None. The key is necessary. | `tarpit`, `maze`, `model_api`: one persona or more. |
+| `seed_env` | Text | None. The key is necessary. | The NAME of the variable that holds the seed: 32 to 1024 bytes. |
+| `limits` | Table | Refer to the README | The connection, size, and time limits. |
+| `tarpit`, `maze`, `model_api` | Table | Refer to the README | The settings of each persona. |
+| `model_api.keys` | List of `{ id, value_env }` | Empty | The decoy keys. `value_env` is the NAME of the variable that holds the key. |
+| `canary` | Table | `enabled = true`, `path_prefix = "/ref"` | The canary instruction. |
+| `events` | Table | Refer to the README | The limits of the event queue. |
+
+```toml
+[decoy]
+id = "decoy-lab"
+bind = "127.0.0.1:8081"
+personas = ["tarpit", "maze", "model_api"]
+seed_env = "AEGIS_DECOY_SEED"
+
+[[decoy.model_api.keys]]
+id = "ht-decoy-model-key"
+value_env = "AEGIS_DECOY_MODEL_KEY"
+```
+
+- Never use the address of a production endpoint.
+- `id` must not be the name of a source in `[[sources]]`.
+- Each decoy key is a honeytoken in the registry of AEGIS, with the `id` of the key.
+- A build without the Cargo feature `decoy` refuses the section.
+
+### `[evidence]`
+
+The evidence archive: each detection, the events that caused it, and each state of an
+incident, as JSON Lines. The sharing commands read it. Refer to
+[sharing.md](sharing.md#the-evidence-archive).
+
+| Key | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `enabled` | Boolean | `true` | With `false`, the section has no effect. |
+| `path` | Path | None. The key is necessary. | The archive file. An older file has the same name and `.1`. |
+| `max_bytes` | Number | `67108864` | The largest number of bytes on the disk. The smallest value is `65536`. |
+
+```toml
+[evidence]
+path = "data/evidence.jsonl"
+max_bytes = 67108864
+```
+
+With no section, the process writes no archive.
+
+### `[share]`
+
+The rules of `aegis report abuse` and `aegis indicators export`. Refer to
+[sharing.md](sharing.md). The service does not use this section.
+
+| Key | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `operator_networks` | List of networks in CIDR form | Empty | All public networks of your organization. No document names an address in them. The commands refuse to run with an empty list. |
+| `operator_domains` | List | Empty | The domains of your organization. No export gives them or their subdomains. |
+| `permit_documentation_ranges` | Boolean | `false` | Permit the documentation ranges. Use it only with the recorded attack log. |
+| `reporter.name`, `reporter.contact` | Text | Not set | The organization that sends a report, and how the receiver can reply. |
+| `networks` | List of `{ prefix, name, abuse_contact }` | Empty | The hosting networks that you know. A report package then has one more report for each network. |
+
+```toml
+[share]
+operator_networks = ["198.51.100.0/24"]
+operator_domains = ["operator.example.org"]
+
+[share.reporter]
+name = "Example Security Team"
+contact = "soc@operator.example.org"
+
+[[share.networks]]
+prefix = "203.0.113.0/24"
+name = "AS64500 Example Hosting"
+abuse_contact = "abuse@hosting.example"
 ```
 
 ### `[api]`
@@ -987,7 +1177,10 @@ the ChatOps setup.
 - With no `[model]` section, the process uses no model.
 - With the default policy, a dry run is permitted, and a gated action needs the approval
   of a person.
-- With no `api` in `[modules]`, the process opens no listener.
+- With no `api` in `[modules]`, the process opens no listener. With no `[decoy]` section,
+  the process runs no decoy.
+- With no `[response.revert]` table, an action with a revert time runs only as a dry run.
+- With no `operator_networks` in `[share]`, the sharing commands write no document.
 
 To permit changes, you must set all of these values:
 
@@ -1005,7 +1198,9 @@ The policy then decides each request. Read [policy.md](policy.md) before you set
   the service and start it again.
 - `[response.graph]`, `[response.webhook]`, `[storage]`, and `[bus.nats.auth]` have no key
   for the name of a secret variable. Use an environment override.
-- One process loads one detection pack and one playbook directory.
+- One process loads one detection pack and one playbook directory. One process runs one
+  decoy.
+- The revert store and the evidence archive are files. They have no PostgreSQL form.
 - `aegis config check` builds the application. It thus creates the audit file and runs
   the database migrations.
 - The keys of `[plugins.limits]` are a part of the limits of the sandbox. The other limits

@@ -55,6 +55,10 @@ All times are on 2026-11-03, in UTC. The line numbers are lines of the log file.
 | 7 | 09:10:50 to 09:11:00 | 620 to 626 | `sp-sync-helper` calls APIs in two tenants from two continents, 2 seconds apart. | Principal acts from two places at an impossible speed | T1078.004 Cloud Accounts |
 | 8 | 09:11:15 | 627 | `sp-sync-helper` reads a honeytoken in a vault. | Honeytoken used | T1552 Unsecured Credentials |
 
+One more detection names no single step. The service principal did steps 4 to 7 in 9
+seconds. The detector for machine cadence reports this chain at step 7:
+"Chain of sensitive actions at machine speed", T1059.009 Cloud API.
+
 The full attack takes 75 seconds. A person cannot respond in that time.
 
 ### Step 1: the password spray
@@ -126,6 +130,14 @@ The principal sp-sync-helper acted from two places 8930 kilometers apart and in 
 The detector then starts a cooldown for that principal. The six API calls give one
 detection.
 
+### The chain at machine speed
+
+The detector `aegis.velocity.machine_cadence` examines the steps of one principal. The
+service principal got a credential, signed in, gave itself a role, and called an API.
+These are four different actions with a median gap of 3 seconds. A person does not work
+at that speed. The chain includes a privileged change, so the detection is `malicious`.
+The detection arrives with the first API call of step 7.
+
 ### Step 8: the honeytoken
 
 The event has the action `honeytoken.trip` and the attribute `honeytoken_id`. The Sigma
@@ -172,17 +184,18 @@ INCIDENT   508657f7-d921-8cb3-add4-c2bd62528abd  critical       open            
            Techniques: T1110.003, T1078, T1528, T1098.001, T1098.003
            Entities:   ip_address 203.0.113.50; user user-dana; application app-sync-helper; service_principal sp-sync-helper; ip_address 203.0.113.51
 DETECTION  2026-11-03T09:10:52.000Z  high           malicious   T1078.004               Principal acts from two places at an impossible speed  [aegis.velocity.impossible_speed]
-INCIDENT   508657f7-d921-8cb3-add4-c2bd62528abd  critical       open            Multi-stage attack: 6 ATT&CK techniques in 7 detections
-           Detections: 7
-           Techniques: T1110.003, T1078, T1528, T1098.001, T1098.003, T1078.004
-           Entities:   ip_address 203.0.113.50; user user-dana; application app-sync-helper; service_principal sp-sync-helper; ip_address 203.0.113.51; ip_address 192.0.2.77
-DETECTION  2026-11-03T09:11:15.000Z  critical       malicious   T1552                   Honeytoken used  [0c9e4f7a-2b6d-4e18-a3f5-7d21c6b8e940]
+DETECTION  2026-11-03T09:10:52.000Z  high           malicious   T1059.009               Chain of sensitive actions at machine speed  [aegis.velocity.machine_cadence]
 INCIDENT   508657f7-d921-8cb3-add4-c2bd62528abd  critical       open            Multi-stage attack: 7 ATT&CK techniques in 8 detections
            Detections: 8
-           Techniques: T1110.003, T1078, T1528, T1098.001, T1098.003, T1078.004, T1552
+           Techniques: T1110.003, T1078, T1528, T1098.001, T1098.003, T1078.004, T1059.009
+           Entities:   ip_address 203.0.113.50; user user-dana; application app-sync-helper; service_principal sp-sync-helper; ip_address 203.0.113.51; ip_address 192.0.2.77
+DETECTION  2026-11-03T09:11:15.000Z  critical       malicious   T1552                   Honeytoken used  [0c9e4f7a-2b6d-4e18-a3f5-7d21c6b8e940]
+INCIDENT   508657f7-d921-8cb3-add4-c2bd62528abd  critical       open            Multi-stage attack: 8 ATT&CK techniques in 9 detections
+           Detections: 9
+           Techniques: T1110.003, T1078, T1528, T1098.001, T1098.003, T1078.004, T1059.009, T1552
            Entities:   ip_address 203.0.113.50; user user-dana; application app-sync-helper; service_principal sp-sync-helper; ip_address 203.0.113.51; ip_address 192.0.2.77; secret kv-prod/legacy-admin-password
 
-Monitoring session complete: 648 events, 8 detections, 7 incident states. Actions taken: 0.
+Monitoring session complete: 648 events, 9 detections, 7 incident states. Actions taken: 0.
 ```
 
 What the output shows:
@@ -230,8 +243,13 @@ list that the code makes.
 | `contain-rogue-service-principal` | 6 | `disable_service_principal`, `revoke_credential`, `kill_session`, `block_ip`, `notify`, `open_ticket` |
 | `respond-to-honeytoken-trip` | 5 | `snapshot_evidence`, `block_ip` for three addresses, `notify` |
 
-The fifth sample playbook, `isolate-compromised-host`, does not match. The incident has
-no host.
+Two sample playbooks do not match. `isolate-compromised-host` needs a host, and the
+incident has no host. `raise-friction-critical-identity-incident` runs only for the
+tenants that its trigger names, and the trigger names only an example tenant.
+
+The `block_ip`, `disable_user`, and `disable_service_principal` requests of the playbooks
+have a revert time of 4 hours. In a dry run, a revert time has no effect. Refer to
+[response.md](response.md).
 
 ### Why nothing changed
 
@@ -251,13 +269,13 @@ Containment is not complete. Of 6 actions: 0 ran, 6 were dry runs, 0 wait for ap
 
 ## The audit trail
 
-The demonstration writes 155 audit records. Each record holds the hash of the record
+The demonstration writes 156 audit records. Each record holds the hash of the record
 before it.
 
 | Record type | Count | Written by | Contents |
 | --- | --- | --- | --- |
 | `config_change` | 1 | `aegis` | The start: the rule pack, the policy digest, the playbooks, the dry-run switches. |
-| `detection` | 8 | `detection` | One record for each detection. |
+| `detection` | 9 | `detection` | One record for each detection. |
 | `incident` | 7 | `correlator` | One record for each change of the incident. |
 | `agent_decision` | 66 | The agents | Each decision of an agent, with its evidence. |
 | `action_proposed` | 23 | The requester | One record for each action request. |
@@ -268,22 +286,22 @@ before it.
 Show the first records:
 
 ```sh
-aegis audit show --path /tmp/aegis-demo/data/audit.jsonl --limit 155 | sed -n 2,13p
+aegis audit show --path /tmp/aegis-demo/data/audit.jsonl --limit 156 | sed -n 2,13p
 ```
 
 ```text
-      1  2026-11-18T06:57:24.883986Z  config_change       aegis                 AEGIS started with the rule pack aegis-identity 0.1.0, the policy 9896d1c602f4cf7bd31db187b00956745f11d947a86ae51736074ac1be94d4b7, and 5 playbooks.
-      2  2026-11-18T06:57:24.888132Z  detection           detection             The detector aegis.velocity.sign_in_burst made the detection "Sign-in burst from one address" (high, malicious).
-      3  2026-11-18T06:57:24.891751Z  incident            correlator            The correlator opened the incident 508657f7-d921-8cb3-add4-c2bd62528abd: Sign-in burst from one address.
-      4  2026-11-18T06:57:24.895786Z  agent_decision      supervisor            Gave incident 508657f7-d921-8cb3-add4-c2bd62528abd to the monitor.
-      5  2026-11-18T06:57:24.899563Z  agent_decision      monitor               Added incident 508657f7-d921-8cb3-add4-c2bd62528abd to the Defensive Graph and gave it to the analyst.
-      6  2026-11-18T06:57:24.903119Z  agent_decision      analyst               The analyst agent changed the incident 508657f7-d921-8cb3-add4-c2bd62528abd from open to investigating.
-      7  2026-11-18T06:57:24.906514Z  agent_decision      analyst               Incident 508657f7-d921-8cb3-add4-c2bd62528abd: The model gave no assessment: the model call failed: unavailable: no model is configured: add a [model] section to use a model. Deterministic triage: 1 detections have the verdict malicious (aegis.velocity.sign_in_burst). ATT&CK techniques: T1110.003.
-      8  2026-11-18T06:57:24.909704Z  agent_decision      responder             Proposed 1 containment actions as a dry run for incident 508657f7-d921-8cb3-add4-c2bd62528abd: block_ip.
-      9  2026-11-18T06:57:24.913500Z  agent_decision      responder             The responder agent proposed block_ip on ip_address:203.0.113.50: Block the address 203.0.113.50. The attack activity comes from it. Detections: aegis.velocity.sign_in_burst.
-     10  2026-11-18T06:57:24.916558Z  action_proposed     responder             responder proposed the action block_ip on ip_address 203.0.113.50.
-     11  2026-11-18T06:57:24.919849Z  policy_decision     dispatcher            Policy permits the action block_ip on ip_address 203.0.113.50.
-     12  2026-11-18T06:57:24.923581Z  action_executed     dispatcher            Connector simulation simulated the action block_ip on ip_address 203.0.113.50. This was a dry run. Nothing changed.
+      1  2026-11-18T19:48:10.618535Z  config_change       aegis                 AEGIS started with the rule pack aegis-identity 0.2.0, the policy 9896d1c602f4cf7bd31db187b00956745f11d947a86ae51736074ac1be94d4b7, and 6 playbooks.
+      2  2026-11-18T19:48:10.628445Z  detection           detection             The detector aegis.velocity.sign_in_burst made the detection "Sign-in burst from one address" (high, malicious).
+      3  2026-11-18T19:48:10.634704Z  incident            correlator            The correlator opened the incident 508657f7-d921-8cb3-add4-c2bd62528abd: Sign-in burst from one address.
+      4  2026-11-18T19:48:10.640562Z  agent_decision      supervisor            Gave incident 508657f7-d921-8cb3-add4-c2bd62528abd to the monitor.
+      5  2026-11-18T19:48:10.644234Z  agent_decision      monitor               Added incident 508657f7-d921-8cb3-add4-c2bd62528abd to the Defensive Graph and gave it to the analyst.
+      6  2026-11-18T19:48:10.649838Z  agent_decision      analyst               The analyst agent changed the incident 508657f7-d921-8cb3-add4-c2bd62528abd from open to investigating.
+      7  2026-11-18T19:48:10.653006Z  agent_decision      analyst               Incident 508657f7-d921-8cb3-add4-c2bd62528abd: The model gave no assessment: the model call failed: unavailable: no model is configured: add a [model] section to use a model. Deterministic triage: 1 detections have the verdict malicious (aegis.velocity.sign_in_burst). ATT&CK techniques: T1110.003.
+      8  2026-11-18T19:48:10.658237Z  agent_decision      responder             Proposed 1 containment actions as a dry run for incident 508657f7-d921-8cb3-add4-c2bd62528abd: block_ip.
+      9  2026-11-18T19:48:10.662966Z  agent_decision      responder             The responder agent proposed block_ip on ip_address:203.0.113.50: Block the address 203.0.113.50. The attack activity comes from it. Detections: aegis.velocity.sign_in_burst.
+     10  2026-11-18T19:48:10.666793Z  action_proposed     responder             responder proposed the action block_ip on ip_address 203.0.113.50.
+     11  2026-11-18T19:48:10.672531Z  policy_decision     dispatcher            Policy permits the action block_ip on ip_address 203.0.113.50.
+     12  2026-11-18T19:48:10.676892Z  action_executed     dispatcher            Connector simulation simulated the action block_ip on ip_address 203.0.113.50. This was a dry run. Nothing changed.
 ```
 
 The times in your output are the times of your run.
@@ -305,7 +323,7 @@ sed -n 12p /tmp/aegis-demo/data/audit.jsonl | python3 -m json.tool
     "actor": "dispatcher",
     "evidence": [
         {
-            "id": "01a1ed72-2bad-73fa-acb2-3a2493467368",
+            "id": "01a1f033-d321-771c-bbe8-edf35d3c8aff",
             "kind": "action"
         },
         {
@@ -318,25 +336,25 @@ sed -n 12p /tmp/aegis-demo/data/audit.jsonl | python3 -m json.tool
             "note": "aegis.velocity.sign_in_burst"
         }
     ],
-    "hash": "a945309840476c59809fa01b3945bddb7ef4374631f3edc6f0c6d7562668ec77",
-    "id": "01a1ed72-2bbb-7035-af18-1766fa51cbce",
+    "hash": "555927dba9be60a69fdbdeb5d22a53e570b76de901cc6a5c1b6ec152498ad285",
+    "id": "01a1f033-d334-7602-b5d7-9a6e38d4af3e",
     "kind": "action_executed",
     "payload": {
-        "action_id": "01a1ed72-2bad-73fa-acb2-3a2493467368",
+        "action_id": "01a1f033-d321-771c-bbe8-edf35d3c8aff",
         "approval": null,
         "connector": "simulation",
         "dry_run": true,
         "dry_run_violation": false,
         "kind": "block_ip",
         "outcome": {
-            "action_id": "01a1ed72-2bad-73fa-acb2-3a2493467368",
-            "completed_at": "2026-11-18T06:57:24.923546Z",
+            "action_id": "01a1f033-d321-771c-bbe8-edf35d3c8aff",
+            "completed_at": "2026-11-18T19:48:10.676766Z",
             "connector": "simulation",
             "details": {
                 "configured_connector": false
             },
             "message": "Dry run: a connector for block_ip would act on 203.0.113.50. No connector is configured for this action. Nothing changed.",
-            "reversible": false,
+            "reversible": true,
             "status": "simulated"
         },
         "target": {
@@ -344,16 +362,17 @@ sed -n 12p /tmp/aegis-demo/data/audit.jsonl | python3 -m json.tool
             "kind": "ip_address"
         }
     },
-    "prev_hash": "d59ecf6f43543df3b69148f5d7d53c0ac19f6ccecaf42df91b4fbe965c053256",
+    "prev_hash": "6969f5d1191877f38d05e86b520f4aa6689279b7c4b10fabe6d457b25578d9d6",
     "sequence": 12,
     "summary": "Connector simulation simulated the action block_ip on ip_address 203.0.113.50. This was a dry run. Nothing changed.",
-    "time": "2026-11-18T06:57:24.923581Z"
+    "time": "2026-11-18T19:48:10.676892Z"
 }
 ```
 
 - `evidence` links the record to the action, to the incident, and to the detection.
 - `prev_hash` is the hash of record 11. `hash` is the hash of this record.
 - `payload.dry_run` is `true`, and the status of the outcome is `simulated`.
+- `reversible` is `true`: `block_ip` has an inverse, so a real connector can undo it.
 
 ### Check the chain
 
@@ -363,7 +382,7 @@ aegis audit verify --path /tmp/aegis-demo/data/audit.jsonl
 
 ```text
 Audit log /tmp/aegis-demo/data/audit.jsonl
-  Records checked: 155
+  Records checked: 156
   Chain: valid
 ```
 

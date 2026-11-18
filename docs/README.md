@@ -28,6 +28,9 @@ section with the name "Limits" says what is not built and what was not tested.
 | [configuration.md](configuration.md) | Each section and each key of `aegis.toml`, the environment overrides, and the secrets. |
 | [operations.md](operations.md) | The audit log, approvals, a change of the rules or the policy, restarts, upgrades, backup, logs, and troubleshooting. |
 | [policy.md](policy.md) | The response policy: the input, the decision, fail closed, tiers, approvals, and role-based access control. |
+| [response.md](response.md) | The revert of an action, the timed revert, the decisions of a person, and the friction actions. |
+| [deception.md](deception.md) | The decoy service: its personas, the canary instruction, decoy keys, placement, safety rules, and limits. |
+| [sharing.md](sharing.md) | Abuse reports and indicators for other defenders, and the evidence archive. AEGIS sends nothing. |
 
 ## Extend
 
@@ -59,6 +62,8 @@ run.
 | The contracts between the subsystems | [`crates/contracts/src`](../crates/contracts/src) |
 | The source connectors | [`crates/ingest/README.md`](../crates/ingest/README.md) |
 | Detection | [`crates/detect/README.md`](../crates/detect/README.md) |
+| The decoy service | [`crates/decoy/README.md`](../crates/decoy/README.md) |
+| Abuse reports and indicator export | [`crates/share/README.md`](../crates/share/README.md) |
 | The agents | [`crates/agents/README.md`](../crates/agents/README.md) |
 | Response and the action connectors | [`crates/respond/README.md`](../crates/respond/README.md) |
 | Policy, access control, and the file audit log | [`crates/policy/README.md`](../crates/policy/README.md) |

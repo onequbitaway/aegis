@@ -89,6 +89,9 @@ data:
     # Each address is in a documentation range (RFC 5737 and RFC 3849). Each domain uses the
     # reserved top-level domain "example" (RFC 2606). No value refers to a real system.
     # Replace this file with indicators from your threat intelligence source.
+    #
+    # The keys first_seen, last_seen, source, and suppress_seconds are optional. The indicator
+    # export of AEGIS writes them. The last indicator shows them.
     indicators:
       - type: ip
         value: 192.0.2.200/29
@@ -132,14 +135,26 @@ data:
         tags:
           - attack.credential-access
           - attack.t1528
+      - type: client_fingerprint
+        value: example-fingerprint-7c1d09
+        description: Example fingerprint of a client that contacted a decoy.
+        severity: medium
+        tags:
+          - attack.reconnaissance
+          - attack.t1595
+        first_seen: "2026-01-05T08:00:00Z"
+        last_seen: "2026-01-06T17:30:00Z"
+        source: example decoy export
+        suppress_seconds: 3600
 
   detections__aegis-identity__pack.yml: |
     name: aegis-identity
-    version: "0.1.0"
+    version: "0.2.0"
     description: >-
-      Detection rules and example indicators for attacks on identity systems: consent to
-      privileged permissions, privileged role changes by workload identities, new accounts,
-      legacy authentication, multi-factor authentication abuse, and honeytoken use.
+      Detection rules and example indicators for attacks on identity systems and for contact
+      with decoys: consent to privileged permissions, privileged role changes by workload
+      identities, new accounts, legacy authentication, multi-factor authentication abuse,
+      honeytoken use, decoy contact, and canary instructions that an automated agent follows.
 
   detections__aegis-identity__rules__account_locked_after_failed_sign_ins.yml: |
     title: Account locked after failed sign-ins
@@ -169,6 +184,12 @@ data:
     tags:
       - attack.credential-access
       - attack.t1110
+    # An attacker with no access can cause this event in any number. One account gives one
+    # detection in 15 minutes.
+    aegis.suppress:
+      window_seconds: 900
+      fields:
+        - actor.id
 
   detections__aegis-identity__rules__consent_to_privileged_permissions.yml: |
     title: Consent to privileged application permissions
@@ -207,6 +228,67 @@ data:
     tags:
       - attack.credential-access
       - attack.t1528
+
+  detections__aegis-identity__rules__decoy_canary_hit.yml: |
+    title: Automated agent followed a canary instruction of a decoy
+    id: ce68feda-b68d-4690-9d03-ba2f31cf87ac
+    status: test
+    description: >-
+      A client asked for a canary path of a decoy. Only a hidden instruction in the content
+      of the decoy names this path, and only an automated agent reads that instruction. The
+      client is an automated agent that acts on the content of the decoy.
+    author: AEGIS project
+    references:
+      - https://attack.mitre.org/techniques/T1595/
+    detection:
+      selection:
+        action: decoy.canary_hit
+      condition: selection
+    falsepositives:
+      - A test of the canary by the security team.
+    level: high
+    tags:
+      - attack.reconnaissance
+      - attack.t1595
+    # One client and one canary give one detection in ten minutes.
+    aegis.suppress:
+      window_seconds: 600
+      fields:
+        - actor.ip
+        - client_fingerprint
+        - canary_id
+
+  detections__aegis-identity__rules__decoy_contact.yml: |
+    title: Client contacted a decoy
+    id: a7b8c02c-60bc-47ca-b31c-049f9d348159
+    status: test
+    description: >-
+      A client connected to a decoy service or sent a request to it. No approved client uses
+      a decoy. Scanners are frequent, so one contact is not proof of an attack.
+    author: AEGIS project
+    references:
+      - https://attack.mitre.org/techniques/T1595/
+    detection:
+      selection:
+        action: decoy.contact
+      condition: selection
+    falsepositives:
+      - An internet scanner.
+      - A vulnerability scan that the operator approved.
+    level: low
+    tags:
+      - attack.reconnaissance
+      - attack.t1595
+    # One client gives one detection in ten minutes. The tenth contact in that time gives one
+    # more detection, which is malicious: a scanner does not stay at a decoy.
+    aegis.suppress:
+      window_seconds: 600
+      fields:
+        - actor.ip
+        - client_fingerprint
+      repeat:
+        count: 10
+        level: high
 
   detections__aegis-identity__rules__honeytoken_used.yml: |
     title: Honeytoken used
@@ -272,6 +354,14 @@ data:
     tags:
       - attack.initial-access
       - attack.t1078.004
+    # A mail client signs in again and again. One account, one address, and one protocol give
+    # one detection in one hour.
+    aegis.suppress:
+      window_seconds: 3600
+      fields:
+        - actor.id
+        - actor.ip
+        - auth_protocol
 
   detections__aegis-identity__rules__mfa_method_changed_by_script_client.yml: |
     title: Multi-factor authentication method changed by a script client
@@ -335,6 +425,12 @@ data:
     tags:
       - attack.credential-access
       - attack.t1621
+    # An attacker who knows the password can cause this event in any number. One account
+    # gives one detection in ten minutes.
+    aegis.suppress:
+      window_seconds: 600
+      fields:
+        - actor.id
 
   detections__aegis-identity__rules__privileged_application_permission_granted.yml: |
     title: Privileged application permission granted
@@ -443,6 +539,7 @@ data:
     | `block-password-spray-source.yaml` | Block the address that a password spray comes from. |
     | `isolate-compromised-host.yaml` | Save the evidence of a compromised host and isolate the host. |
     | `respond-to-honeytoken-trip.yaml` | Save the evidence of a honeytoken trip, block the source address, and tell the security team. |
+    | `raise-friction-critical-identity-incident.yaml` | Stop user consent to applications in the tenant during a critical identity incident, with a timed revert, and tell the security team. |
 
     ## Before you use a playbook
 
@@ -453,6 +550,54 @@ data:
        Microsoft Graph connector. The other actions need a webhook endpoint for the action type.
     3. Set your policy. Each request goes through the policy engine. A playbook cannot skip the
        policy or an approval.
+    4. Make sure that each step with `revert_after` can do its timed revert. Refer to
+       [Timed revert](#timed-revert).
+
+    ## Timed revert
+
+    A wrong containment has a cost: a disabled account stops the work of its owner, and a blocked
+    address can stop legitimate users. Each reversible containment step in the samples has
+    `revert_after`. The action runs, and AEGIS reverts it at that time unless a person confirms
+    it. The notification and the ticket of each playbook tell the security team to confirm.
+
+    | Step | Playbooks | `revert_after` |
+    | --- | --- | --- |
+    | `block_ip` | `block-password-spray-source`, `contain-rogue-service-principal`, `respond-to-honeytoken-trip` | `4h` |
+    | `disable_user` | `contain-compromised-user` | `4h` |
+    | `disable_service_principal` | `contain-rogue-service-principal` | `4h` |
+    | `isolate_host` | `isolate-compromised-host` | `4h` |
+    | `restrict_user_consent` | `raise-friction-critical-identity-incident` | `2h` |
+
+    `kill_session`, `revoke_credential`, `snapshot_evidence`, `notify`, and `open_ticket` have no
+    inverse. The loader rejects `revert_after` on these steps.
+
+    A step with `revert_after` needs these items when it is not a dry run:
+
+    - A dispatcher with a revert store, and a revert scheduler that runs. Without a revert
+      store, the step fails and changes nothing.
+    - A connector that can undo the action. For a webhook endpoint, set `reversible: true`. If
+      the connector cannot undo the action, the step fails and changes nothing.
+    - A policy that fits. With `policies/default.rego`, each containment action and each revert
+      needs the approval of a person. `policies/examples/contain_first_with_timed_revert.rego`
+      lets a reversible action with a revert time of 4 hours or less run first, and lets the
+      scheduler revert it.
+
+    Remove `revert_after` from a step if the action must stay until a person reverts it.
+
+    ## The friction playbook
+
+    `raise-friction-critical-identity-incident.yaml` does not act on the attacker. It changes a
+    setting of your own tenant through Microsoft Graph: users cannot consent to applications.
+    The change applies to all users of the tenant, so the sample has three limits:
+
+    - The trigger has a `tenants` list with an example tenant. Replace it with your tenant. The
+      playbook runs for no other tenant.
+    - The step has `revert_after: 2h`. AEGIS writes the earlier setting again after 2 hours,
+      unless a person confirms the change.
+    - `restrict_user_consent` is a custom action, so the default policy requires approval.
+
+    The step needs the Microsoft Graph connector with the application permission
+    `Policy.ReadWrite.Authorization`.
 
     ## Conventions in the samples
 
@@ -461,6 +606,9 @@ data:
     - `revoke_credential` reads the key of the credential from the detection attribute
       `credential_id`. If no detection of the incident has this attribute, the step fails and
       sends no request.
+    - `revert_after` is the time in which a person confirms the action. It is not the life of
+      the action in your product: `duration_hours` of a `block_ip` step is a parameter for your
+      firewall automation.
     - Each step that selects entities has a `max_targets` limit. A step with more targets fails
       and sends no request. This prevents a mass change from one incorrect incident.
     - Each step has `continue_on_error: true`. Thus a containment step that fails does not stop
@@ -487,13 +635,17 @@ data:
         target:
           each_entity: ip_address
         max_targets: 10
+        # A block of a wrong address stops legitimate users. If no person confirms the block
+        # in 4 hours, AEGIS removes it.
+        revert_after: 4h
         parameters:
           direction: inbound
           duration_hours: 24
           comment: "AEGIS incident {{incident.id}}"
         reason: >-
           Incident {{incident.id}}: a password spray came from the address {{target.id}}.
-          Block it for 24 hours.
+          Block it for 24 hours. AEGIS removes the block after 4 hours, unless a person
+          confirms it.
         continue_on_error: true
 
       - id: notify-security-team
@@ -508,7 +660,8 @@ data:
           severity: "{{incident.severity}}"
         reason: >-
           Incident {{incident.id}} ({{incident.severity}}): AEGIS blocked the source of a
-          password spray. Examine the accounts that the spray reached.
+          password spray. Examine the accounts that the spray reached. Confirm the block to
+          keep it. AEGIS removes a block with no confirmation after 4 hours.
         continue_on_error: true
 
   playbooks__contain-compromised-user.yaml: |
@@ -541,10 +694,13 @@ data:
         target:
           each_entity: user
         max_targets: 5
+        # A disabled account stops the work of its owner. If no person confirms the action in
+        # 4 hours, AEGIS enables the account again.
+        revert_after: 4h
         reason: >-
           Incident {{incident.id}} ({{incident.severity}}): disable the account
-          {{target.name}} until its owner sets a new password. The operator can enable it
-          again.
+          {{target.name}} until its owner sets a new password. AEGIS enables the account
+          again after 4 hours, unless a person confirms the action.
         continue_on_error: true
 
       - id: open-ticket
@@ -559,7 +715,8 @@ data:
           priority: "{{incident.severity}}"
         reason: >-
           Incident {{incident.id}}: reset the password and examine the authentication methods
-          of each account in the incident.
+          of each account in the incident. Confirm each disabled account that must stay
+          disabled. AEGIS enables an account with no confirmation after 4 hours.
         continue_on_error: true
 
   playbooks__contain-rogue-service-principal.yaml: |
@@ -574,6 +731,10 @@ data:
     #
     # Each step continues after a failure. Thus a containment step that fails does not stop
     # the notification and the ticket. The run report shows each failure.
+    #
+    # The two reversible containment steps have a timed revert. If no person confirms the
+    # action in 4 hours, AEGIS reverts it. The removal of the credential and the stop of the
+    # sessions have no inverse, so they have no timed revert.
     name: contain-rogue-service-principal
     description: >-
       Disable a service principal that shows signs of attacker control, revoke its new
@@ -593,10 +754,12 @@ data:
         target:
           each_entity: service_principal
         max_targets: 5
+        revert_after: 4h
         reason: >-
           Incident {{incident.id}} ({{incident.severity}}): the service principal
           {{target.name}} shows signs of attacker control ({{incident.techniques}}).
-          Disable it. The operator can enable it again.
+          Disable it. AEGIS enables it again after 4 hours, unless a person confirms the
+          action.
         continue_on_error: true
 
       - id: revoke-credential
@@ -627,13 +790,15 @@ data:
         target:
           each_entity: ip_address
         max_targets: 10
+        revert_after: 4h
         parameters:
           direction: inbound
           duration_hours: 72
           comment: "AEGIS incident {{incident.id}}"
         reason: >-
           Incident {{incident.id}}: the attack came from the address {{target.id}}. Block it
-          in the firewall of the operator.
+          in the firewall of the operator. AEGIS removes the block after 4 hours, unless a
+          person confirms it.
         continue_on_error: true
 
       - id: notify-security-team
@@ -649,7 +814,9 @@ data:
           techniques: "{{incident.techniques}}"
         reason: >-
           Incident {{incident.id}} ({{incident.severity}}): AEGIS started the containment of a
-          rogue service principal. Playbook: {{playbook.name}}.
+          rogue service principal. Playbook: {{playbook.name}}. Confirm the disabled service
+          principal and the blocked address to keep them. AEGIS reverts an action with no
+          confirmation after 4 hours.
         continue_on_error: true
 
       - id: open-ticket
@@ -701,10 +868,13 @@ data:
         target:
           each_entity: host
         max_targets: 5
+        # An isolated host stops the service that it runs. If no person confirms the isolation
+        # in 4 hours, AEGIS releases the host.
+        revert_after: 4h
         reason: >-
           Incident {{incident.id}} ({{incident.severity}}): the host {{target.name}} runs
-          attacker code ({{incident.techniques}}). Isolate it from the network. The operator
-          can release it again.
+          attacker code ({{incident.techniques}}). Isolate it from the network. AEGIS releases
+          it after 4 hours, unless a person confirms the isolation.
         continue_on_error: true
 
       - id: open-ticket
@@ -718,7 +888,68 @@ data:
           title: "Isolated host: {{incident.title}}"
           priority: "{{incident.severity}}"
         reason: >-
-          Incident {{incident.id}}: examine and rebuild each isolated host.
+          Incident {{incident.id}}: examine and rebuild each isolated host. Confirm each
+          isolation that must stay. AEGIS releases a host with no confirmation after 4 hours.
+        continue_on_error: true
+
+  playbooks__raise-friction-critical-identity-incident.yaml: |
+    # Raise friction in the tenant during a critical identity incident.
+    #
+    # A friction action does not act on the attacker. It changes a setting of your own tenant
+    # through Microsoft Graph, so that the next step of the attack is more difficult while the
+    # security team examines the incident. This playbook stops user consent to applications.
+    # An attacker then cannot get a new consent grant from a user.
+    #
+    # The change applies to all users of the tenant. Thus:
+    #
+    #   - The trigger names the tenants in which you permit this playbook. Replace the example
+    #     tenant with your tenant. The playbook runs for no other tenant.
+    #   - The step has a timed revert. If no person confirms the change in 2 hours, AEGIS
+    #     writes the earlier setting again.
+    #   - The action is a custom action, so the default policy requires approval for it.
+    #
+    # The step needs the Microsoft Graph connector with the application permission
+    # Policy.ReadWrite.Authorization, and a dispatcher with a revert store.
+    name: raise-friction-critical-identity-incident
+    description: >-
+      Stop user consent to applications in the tenant during a critical identity incident,
+      with a timed revert, and tell the security team.
+    trigger:
+      min_severity: critical
+      techniques_any:
+        - T1528      # Steal Application Access Token: consent to privileged scopes
+        - T1098.001  # Additional Cloud Credentials
+        - T1098.003  # Additional Cloud Roles
+      tenants:
+        - tenant.example.com
+    steps:
+      - id: restrict-user-consent
+        action:
+          custom: restrict_user_consent
+        target: incident_tenant
+        revert_after: 2h
+        reason: >-
+          Incident {{incident.id}} ({{incident.severity}}): an identity attack is in progress
+          in the tenant {{target.id}} ({{incident.techniques}}). Stop user consent to
+          applications. AEGIS writes the earlier setting again after 2 hours, unless a person
+          confirms the change.
+        continue_on_error: true
+
+      - id: notify-security-team
+        action: notify
+        target:
+          fixed:
+            kind: other
+            id: security-operations
+            name: Security operations channel
+        parameters:
+          title: "{{incident.title}}"
+          severity: "{{incident.severity}}"
+          techniques: "{{incident.techniques}}"
+        reason: >-
+          Incident {{incident.id}} ({{incident.severity}}): AEGIS stops user consent to
+          applications in the tenant {{incident.tenant}} for 2 hours. Users cannot consent to
+          a new application in this time. Confirm the change to keep it, or revert it now.
         continue_on_error: true
 
   playbooks__respond-to-honeytoken-trip.yaml: |
@@ -754,12 +985,14 @@ data:
         target:
           each_entity: ip_address
         max_targets: 5
+        revert_after: 4h
         parameters:
           direction: inbound
           duration_hours: 72
           comment: "AEGIS incident {{incident.id}}"
         reason: >-
           Incident {{incident.id}}: the address {{target.id}} touched a honeytoken. Block it.
+          AEGIS removes the block after 4 hours, unless a person confirms it.
         continue_on_error: true
 
       - id: notify-security-team
@@ -774,7 +1007,8 @@ data:
           severity: "{{incident.severity}}"
         reason: >-
           Incident {{incident.id}} ({{incident.severity}}): an identity touched a honeytoken.
-          An attacker is in the environment. Examine the identity immediately.
+          An attacker is in the environment. Examine the identity immediately. Confirm the
+          block of the source address to keep it for more than 4 hours.
         continue_on_error: true
 
   policies__README.md: |
@@ -796,6 +1030,7 @@ data:
     | `examples/maintenance_window.rego` | The default behavior, but each change is denied during the maintenance window that you give in the environment data. |
     | `examples/protected_entities.rego` | The default behavior, but only a person with the role `incident_commander` can request a change to a protected entity, and the change needs approval. |
     | `examples/protected_entities.yaml` | The list of protected entities for `protected_entities.rego`. Load it as a data file. |
+    | `examples/contain_first_with_timed_revert.rego` | The default behavior, and a reversible containment action or a friction action with a revert time of 4 hours or less runs with no approval for an incident with the severity `high` or `critical`. The revert scheduler reverts it with no approval, unless a person confirms the action. |
 
     Each `.rego` file is a complete policy. Load one of them. Do not load two of them
     together: they define the same rule. When two files give different results for a request,
@@ -814,8 +1049,16 @@ data:
     AEGIS rejects a policy that does not compile and continues to use the policy that it has.
     If a policy gives no valid result for a request, AEGIS denies the request.
 
+    ## Revert requests
+
+    A revert is a request with the action `{"custom": "revert"}`. With `default.rego`, each
+    revert needs the approval of a person. This includes the timed revert that AEGIS requests
+    when nobody confirmed an action. The containment then stays until a person decides. Use
+    `examples/contain_first_with_timed_revert.rego` if the timed revert must run with no
+    person.
+
     Refer to `crates/policy/README.md` for the full description of the input, the result, and
-    the configuration.
+    the configuration. Refer to `docs/response.md` for the timed revert.
 
   policies__default.rego: |
     # The default response policy of AEGIS.
@@ -967,6 +1210,140 @@ data:
     	"reasons": ["The incident is critical and the target is a service principal. Containment does not wait for approval."],
     } if {
     	urgent_containment
+    }
+
+    # An action in the auto tier is allowed.
+    else := {
+    	"effect": "allow",
+    	"tier": "auto",
+    	"reasons": ["The action is in the auto tier."],
+    } if {
+    	input.default_tier == "auto"
+    }
+
+    # An action in the gated tier needs approval.
+    else := {
+    	"effect": "require_approval",
+    	"tier": "gated",
+    	"reasons": ["The action is in the gated tier. A person must approve it."],
+    } if {
+    	input.default_tier == "gated"
+    }
+
+  policies__examples__contain_first_with_timed_revert.rego: |
+    # Example: contain first, with a timed revert.
+    #
+    # A containment action that waits for a person can be too late. A containment action that
+    # runs with no person can be wrong. With this policy, a reversible containment action runs
+    # immediately, but only if the request has a timed revert with a short time. If no person
+    # confirms the action before that time, AEGIS reverts it.
+    #
+    #   - A request for one of the `contain_first_actions` or one of the `friction_actions`
+    #     runs with no approval if these two conditions are true: its parameter
+    #     `revert_after_seconds` is a number from 1 to `max_revert_after_seconds`, and the
+    #     incident has one of the `urgent_severities`.
+    #   - The revert scheduler of AEGIS reverts such an action at its time with no approval.
+    #   - All other requests follow the default policy. Thus a containment action with no
+    #     timed revert, or with a longer time, needs the approval of a person. A revert that
+    #     a person or an agent requests also needs approval.
+    #
+    # A playbook step sets the parameter with its field `revert_after`. AEGIS accepts the
+    # parameter only for an action that has an inverse.
+    #
+    # A revert is a request with the action {"custom": "revert"}. Its parameter `reverts`
+    # names the action that it undoes: action_id, kind, requested_by, connector, executed_at,
+    # and revert_after_seconds.
+    #
+    # To use this example, load this file in place of `default.rego`. Do not load the two
+    # files together: each of them is a complete policy.
+    #
+    # HOW TO CHANGE THIS POLICY
+    #
+    #   - Change `max_revert_after_seconds` to set the longest revert time.
+    #   - Change `contain_first_actions` and `friction_actions` to select the actions.
+    #   - Change `urgent_severities` to select the incidents to which the rule applies.
+    #   - Remove the rule for `timed_revert` if a person must approve each revert. A timed
+    #     revert then waits in the approval queue, and the containment stays.
+    package aegis.response
+
+    import rego.v1
+
+    # The longest revert time with which an action can run first, in seconds. 14400 is 4 hours.
+    max_revert_after_seconds := 14400
+
+    # The reversible actions that can run first.
+    contain_first_actions := {"disable_user", "disable_service_principal", "block_ip", "isolate_host"}
+
+    # The friction actions that can run first. A friction action is a custom action.
+    friction_actions := {"restrict_user_consent", "raise_friction"}
+
+    # The incident severities for which containment does not wait for a person.
+    urgent_severities := {"high", "critical"}
+
+    # The identity of the revert scheduler of AEGIS.
+    revert_scheduler := "revert-scheduler"
+
+    has_short_revert if {
+    	seconds := input.action.parameters.revert_after_seconds
+    	is_number(seconds)
+    	seconds >= 1
+    	seconds <= max_revert_after_seconds
+    }
+
+    is_contain_first_action if {
+    	input.action.kind in contain_first_actions
+    }
+
+    is_contain_first_action if {
+    	input.action.kind.custom in friction_actions
+    }
+
+    contain_first if {
+    	is_contain_first_action
+    	has_short_revert
+    	input.incident.severity in urgent_severities
+    }
+
+    # The revert that the scheduler requests when nobody confirmed an action with a timed
+    # revert.
+    timed_revert if {
+    	input.action.kind.custom == "revert"
+    	input.principal.kind == "system"
+    	input.principal.id == revert_scheduler
+    	is_number(input.action.parameters.reverts.revert_after_seconds)
+    }
+
+    # No other rule matches: deny.
+    default decision := {
+    	"effect": "deny",
+    	"tier": "gated",
+    	"reasons": ["No rule of the policy permits this request."],
+    }
+
+    # A dry run is allowed. A dry run changes nothing.
+    decision := {
+    	"effect": "allow",
+    	"reasons": ["The request is a dry run. A dry run changes nothing."],
+    } if {
+    	input.action.dry_run == true
+    }
+
+    # A reversible action with a short timed revert runs first.
+    else := {
+    	"effect": "allow",
+    	"tier": "auto",
+    	"reasons": ["The action has an inverse and a timed revert of a permitted length. It runs first. AEGIS reverts it if no person confirms it."],
+    } if {
+    	contain_first
+    }
+
+    # The scheduler reverts an action that nobody confirmed.
+    else := {
+    	"effect": "allow",
+    	"tier": "auto",
+    	"reasons": ["Nobody confirmed the action before its revert time. The revert scheduler reverts it."],
+    } if {
+    	timed_revert
     }
 
     # An action in the auto tier is allowed.
@@ -1233,8 +1610,17 @@ data:
     playbooks = "dry_run"
     playbook_dir = "playbooks"
 
+    # The timed revert: the file holds the pending reverts, so a restart does not lose them.
+    [response.revert]
+    store = "/var/lib/aegis/pending-reverts.json"
+
     [ingest]
     checkpoint_dir = "/var/lib/aegis/checkpoints"
+
+    # The evidence archive for the sharing commands.
+    [evidence]
+    path = "/var/lib/aegis/evidence.jsonl"
+    max_bytes = 67108864
 
     # The server has no TLS. It listens on the pod address for the Service and the probes.
     [api]
@@ -1334,8 +1720,8 @@ spec:
         app.kubernetes.io/part-of: aegis
       annotations:
         # A change of the configuration or of the starter files starts a new pod.
-        checksum/config: b2ea27ffedfd91930918f5df7473b128ecc460490a90172414e016cacd601cc0
-        checksum/starter: 29155cfa0dfc1c4e3f86a3ca8226f8be953346795a770e9aa1684ffbf5e51067
+        checksum/config: 6afd4bc6b05929535f9a9dc025c68b7578257044497dcf10c893d0c0bcf6590b
+        checksum/starter: 56b7e0734ad12d53bf81eb9d21ca1793702f9fb09ee83da0e529665cf23f8b66
     spec:
       serviceAccountName: aegis
       # AEGIS does not call the Kubernetes API.
@@ -1430,6 +1816,10 @@ spec:
                       path: detections/aegis-identity/rules/account_locked_after_failed_sign_ins.yml
                     - key: detections__aegis-identity__rules__consent_to_privileged_permissions.yml
                       path: detections/aegis-identity/rules/consent_to_privileged_permissions.yml
+                    - key: detections__aegis-identity__rules__decoy_canary_hit.yml
+                      path: detections/aegis-identity/rules/decoy_canary_hit.yml
+                    - key: detections__aegis-identity__rules__decoy_contact.yml
+                      path: detections/aegis-identity/rules/decoy_contact.yml
                     - key: detections__aegis-identity__rules__honeytoken_used.yml
                       path: detections/aegis-identity/rules/honeytoken_used.yml
                     - key: detections__aegis-identity__rules__legacy_mail_protocol_sign_in.yml
@@ -1454,6 +1844,8 @@ spec:
                       path: playbooks/contain-rogue-service-principal.yaml
                     - key: playbooks__isolate-compromised-host.yaml
                       path: playbooks/isolate-compromised-host.yaml
+                    - key: playbooks__raise-friction-critical-identity-incident.yaml
+                      path: playbooks/raise-friction-critical-identity-incident.yaml
                     - key: playbooks__respond-to-honeytoken-trip.yaml
                       path: playbooks/respond-to-honeytoken-trip.yaml
                     - key: policies__README.md
@@ -1462,6 +1854,8 @@ spec:
                       path: policies/default.rego
                     - key: policies__examples__auto_contain_service_principals.rego
                       path: policies/examples/auto_contain_service_principals.rego
+                    - key: policies__examples__contain_first_with_timed_revert.rego
+                      path: policies/examples/contain_first_with_timed_revert.rego
                     - key: policies__examples__maintenance_window.rego
                       path: policies/examples/maintenance_window.rego
                     - key: policies__examples__protected_entities.rego

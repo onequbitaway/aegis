@@ -44,7 +44,8 @@ authorization to defend.
 - [ ] Let only the operator write the configuration file, the policy, the detection
       pack, the playbooks, and the plugin directory. The AEGIS user needs only read
       access to them.
-- [ ] Let only the AEGIS user read and write the data directory.
+- [ ] Let only the AEGIS user read and write the data directory. It holds the audit log,
+      the revert store, and the evidence archive. The archive holds raw log records.
 - [ ] Keep the configuration directory in version control.
 
 ### Secrets
@@ -108,6 +109,30 @@ authorization to defend.
 - [ ] Run only native connectors that you trust. A native connector has all rights of
       the process.
 
+### Timed reverts
+
+- [ ] Read [response.md](response.md) before you permit an action that runs first.
+- [ ] Keep `policies/default.rego` until you examined the timed reverts in dry runs.
+      With it, each revert needs the approval of a person.
+- [ ] Run one service for one revert store file.
+- [ ] Give the token for `aegis reverts` in an environment variable. Use HTTPS for an
+      address that is not a loopback address.
+
+### The decoy service
+
+- [ ] Never put a decoy on a production endpoint or on the address of the operator API.
+- [ ] Run a decoy only on an address that you own.
+- [ ] Make the seed and each decoy key with a random generator. Give them to the process
+      as environment variables.
+- [ ] Plant a decoy key only where no legitimate process reads it.
+- [ ] Treat each text of a decoy event as data from an attacker.
+
+### Sharing
+
+- [ ] Put all public networks of your organization in `share.operator_networks`.
+- [ ] Do not set `share.permit_documentation_ranges` for a document that you send.
+- [ ] Read each document before you send it. AEGIS sends nothing.
+
 ## Security properties and their tests
 
 Each property below has one or more tests in the repository. The test file is the path
@@ -125,6 +150,41 @@ after `crates/`. Each test name is the name of a test function.
 | The policy decides again before an approved action runs. | `respond/tests/dispatcher.rs` | `resume_evaluates_the_policy_again` |
 | A rejected action does not run. | `app/tests/approval.rs` | `a_rejection_does_not_run_the_action` |
 | A response plan of a model also goes through the dispatcher. | `respond/tests/draft_response.rs` | `a_draft_runs_through_the_dispatcher_so_policy_applies` |
+
+### Revert and timed revert
+
+| Property | Test file | Test |
+| --- | --- | --- |
+| The service reverts an action at its revert time, and the audit chain links the records. | `app/tests/revert.rs` | `the_service_reverts_an_action_at_its_time_when_nobody_confirms` |
+| A confirmation keeps the action, and it needs a person with the permission to approve. | `app/tests/revert.rs` | `a_confirmation_keeps_the_action_and_needs_the_permission_to_approve` |
+| A restart keeps the pending revert. | `app/tests/revert.rs` | `a_restart_keeps_the_pending_revert_and_the_new_process_does_the_revert` |
+| A revert that a person requests goes through the policy and the four-eyes rule. | `app/tests/revert.rs` | `a_person_reverts_an_action_now_and_the_revert_goes_through_the_policy` |
+| With no revert store, a live action with a revert time does not run. | `app/tests/revert.rs` | `with_no_revert_table_a_live_action_with_a_revert_time_does_not_run` |
+| A second application does not write the revert store of the service. | `app/tests/revert.rs` | `a_second_application_with_its_own_audit_file_has_no_revert_store` |
+| A revert store file that is not valid stops the start. | `app/tests/revert.rs` | `a_store_file_that_is_not_valid_stops_the_build` |
+| Each revert route needs a token and the permission to approve. | `app/tests/api.rs` | `a_person_decides_the_timed_reverts_through_http` |
+| A principal without the permission changes nothing. | `api/tests/api/reverts.rs` | `a_principal_without_the_permission_changes_nothing` |
+| The token of `aegis reverts` goes only over HTTPS or to a loopback address. | `cli/src/client.rs` | `the_token_goes_only_over_https_or_to_a_loopback_address` |
+
+### The decoy service
+
+| Property | Test file | Test |
+| --- | --- | --- |
+| A contact, a canary hit, and a decoy key give detections. No record holds a decoy key or the seed. The decoy stops with the service. | `app/tests/decoy.rs` | `a_contact_a_canary_hit_and_a_decoy_key_give_detections_and_one_incident` |
+| A decoy with no seed stops the start, and the message shows no secret. | `app/tests/decoy.rs` | `a_decoy_with_no_seed_stops_the_start_and_names_the_variable` |
+| A decoy on the address of the operator API is refused. | `app/tests/decoy.rs` | `a_decoy_on_the_address_of_the_operator_api_is_refused` |
+| A local session starts no decoy. | `app/tests/decoy.rs` | `the_decoy_needs_the_ingest_module_and_does_not_start_in_a_local_session` |
+| The decoy never sends a compressed body, and each answer has a byte limit and a time limit. | `decoy/tests/limits.rs`, `decoy/tests/tarpit.rs` | All tests of the two files |
+
+### Sharing and flood protection
+
+| Property | Test file | Test |
+| --- | --- | --- |
+| With no operator networks, no document is made. A false positive gives no report. | `app/tests/sharing.rs` | `the_abuse_report_comes_from_the_archive_and_refuses_without_operator_networks` |
+| No indicator names an operator address, and a changed audit log is refused. | `app/tests/sharing.rs` | `the_indicators_name_only_the_attacker_side_and_a_changed_audit_log_is_refused` |
+| The report files verify against their manifest and hold no operator name. | `cli/tests/cli.rs` | `report_abuse_writes_reports_whose_manifest_verifies_and_that_name_no_operator_data` |
+| Only the owner can read the evidence archive. | `app/src/evidence.rs` | `only_the_owner_can_read_the_archive_file` |
+| A replay limits the states of one incident and loses no detection. | `app/tests/replay.rs` | `a_replay_limits_the_states_of_one_incident_and_loses_no_detection` |
 
 ### Fail closed
 
@@ -309,3 +369,8 @@ cargo test -p aegis-storage --features docker-tests
   hash in a different system.
 - A model can close an incident that has only `suspicious` detections. Refer to
   [architecture.md](architecture.md#threat-model-of-aegis).
+- The decoy has no TLS. A decoy on a public address gets contacts from scanners.
+- The evidence archive and the revert store are files with no hash chain. The audit log
+  is the record of each decision.
+- The check for secrets in a shared document uses shapes and names. It cannot find each
+  secret.

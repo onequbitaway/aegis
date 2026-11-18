@@ -33,15 +33,43 @@ own.
 | --- | --- | --- | --- |
 | File source | Source | `[[sources]]` with `type = "file"` | Reads normalized events from a JSON Lines file. |
 | Entra ID source | Source | `[[sources]]` with `type = "entra"` | Reads the sign-in log and the directory audit log of one Microsoft Entra ID tenant. |
-| Microsoft Graph | Action | `[response.graph]` | `disable_service_principal`, `disable_user`, `kill_session`, `revoke_credential`, `rotate_credential`. |
+| Decoy service | Source | `[decoy]` | Publishes each contact with the decoy as an event. Refer to [deception.md](deception.md). |
+| Microsoft Graph | Action | `[response.graph]` | `disable_service_principal`, `disable_user`, `kill_session`, `revoke_credential`, `rotate_credential`, and the friction action `restrict_user_consent`. |
 | Webhook | Action | `[response.webhook]` | Sends a signed JSON document to an HTTPS endpoint of the operator, for each action type that has an endpoint. |
 | Honeytokens | Action | Always present | `deploy_honeytoken`: records a decoy in the honeytoken registry. |
-| Simulation | Action | Present with `response.dry_run = true` | Reports a dry run for an action type that has no other connector. It refuses each request that is not a dry run. |
+| Simulation | Action | Present with `response.dry_run = true` | Reports a dry run for a built-in action type or a friction action that has no other connector. It refuses each request that is not a dry run. |
 | Plugins | Source or action | `[plugins]` | Each WebAssembly plugin of the plugin directory. |
 
 Refer to [configuration.md](configuration.md) for the keys. Refer to the READMEs of
 [`aegis-ingest`](../crates/ingest/README.md) and [`aegis-respond`](../crates/respond/README.md)
 for the details of each connector.
+
+### Revert
+
+`revert(request)` undoes one action. The dispatcher calls it for a revert that a person
+requests, and for a timed revert. Refer to [response.md](response.md).
+
+- The outcome of `execute` has the field `reversible`. Set it to `true` only if `revert`
+  can undo the action. Set it also in a dry run: the dispatcher asks for a dry run to
+  learn if the connector can undo an action with a revert time.
+- `revert` gets the initial request with one more parameter, `execution_details`: the
+  `details` of the outcome of `execute`. Put the earlier state of the target in the
+  details, and read it in `revert`.
+- A revert goes through the policy, the approval queue, and the audit log, as each
+  other action.
+
+### Friction actions
+
+A friction action changes a control in the environment of the operator, and it has an
+inverse. It does not act on an attacker.
+
+| Action | Connector | Effect |
+| --- | --- | --- |
+| `{custom: restrict_user_consent}` | Microsoft Graph | Users of the tenant cannot consent to applications. The application permission is `Policy.ReadWrite.Authorization`. |
+| `{custom: raise_friction}` | Webhook | The endpoint of the operator raises a control. The endpoint must have `reversible: true`. |
+
+The dispatcher runs a friction action only on a connector that can undo it. The README of
+[`aegis-respond`](../crates/respond/README.md#friction-actions) has the details.
 
 ## Native or plugin
 
@@ -635,15 +663,18 @@ Do these steps in the root of the repository.
      api: off
      bus: memory
      connectors: webhook-notify, honeytokens, simulation
+     decoy: off
      dispatcher_dry_run: true
+     evidence_archive: /tmp/aegis-plugins/data/evidence.jsonl
      model: false
      modules: ingest, detection, monitor, hunter, analyst, responder, deception, reporter
      playbook_mode: dry_run
-     playbooks: block-password-spray-source, contain-compromised-user, contain-rogue-service-principal, isolate-compromised-host, respond-to-honeytoken-trip
+     playbooks: block-password-spray-source, contain-compromised-user, contain-rogue-service-principal, isolate-compromised-host, raise-friction-critical-identity-incident, respond-to-honeytoken-trip
      rule_pack: aegis-identity
-     rules: 9
+     rules: 11
      sources: example-source
      storage: memory
+     timed_revert: /tmp/aegis-plugins/data/pending-reverts.json
    ```
 
    The action plugin is the connector `webhook-notify`. The source plugin is the source
@@ -731,8 +762,9 @@ The configuration /tmp/aegis-plugins/aegis.toml has 1 problems:
 - The `aegis` program cannot load a native connector that is not a part of AEGIS. A
   native connector needs a program that you build with the `aegis-app` library, as in
   the example above. Use a plugin to add a connector to the `aegis` program.
-- The dispatcher has no path for `revert`. A connector can implement it, but no command
-  and no API route calls it.
+- The dispatcher calls `revert` only for an action that changed the target, and only on
+  the connector that did the action. A connector that reports `reversible: false` gets
+  no `revert` call.
 - A credential rotation of the Microsoft Graph connector gives the new secret to a
   receiver in the memory of the process. The `aegis` program has no vault connection.
 - A plugin cannot keep state between calls, and it cannot start work on its own. The

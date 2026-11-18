@@ -14,7 +14,7 @@ The [quickstart](../../docs/quickstart.md) builds this configuration step by ste
 | --- | --- |
 | `aegis.toml` | The configuration. |
 | `policies/approval-rehearsal.rego` | A policy that makes one action type wait for a person, also in a dry run. |
-| `data/` | The audit log and the checkpoints. AEGIS writes them. |
+| `data/` | The audit log, the checkpoints, the revert store, and the evidence archive. AEGIS writes them. |
 
 ## What the configuration does
 
@@ -22,6 +22,10 @@ The [quickstart](../../docs/quickstart.md) builds this configuration step by ste
 - **Storage and bus.** The incidents, the Defensive Graph, and the bus are in the memory
   of the process.
 - **Audit log.** The file `data/audit.jsonl` holds the hash-chained audit log.
+- **Timed revert and evidence archive.** The tables `[response.revert]` and `[evidence]`
+  are on, as in the starter configuration. Each action of this example is a dry run, so
+  no action has a pending revert. Refer to [response.md](../../docs/response.md) and
+  [sharing.md](../../docs/sharing.md).
 - **Policy.** `approval-rehearsal.rego` is the default policy with one change. Each
   `disable_service_principal` request needs the approval of a person, also in a dry run.
 - **Operator API.** The API and the console listen on `127.0.0.1:8080`. One principal,
@@ -49,16 +53,22 @@ Do these steps in the root of the repository.
      api: 127.0.0.1:8080
      bus: memory
      connectors: honeytokens, simulation
+     decoy: off
      dispatcher_dry_run: true
+     evidence_archive: /private/tmp/aegis-src/examples/offline-demo/data/evidence.jsonl
      model: false
      modules: ingest, detection, monitor, hunter, analyst, responder, deception, reporter, api
      playbook_mode: dry_run
-     playbooks: block-password-spray-source, contain-compromised-user, contain-rogue-service-principal, isolate-compromised-host, respond-to-honeytoken-trip
+     playbooks: block-password-spray-source, contain-compromised-user, contain-rogue-service-principal, isolate-compromised-host, raise-friction-critical-identity-incident, respond-to-honeytoken-trip
      rule_pack: aegis-identity
-     rules: 9
+     rules: 11
      sources: replay
      storage: memory
+     timed_revert: /private/tmp/aegis-src/examples/offline-demo/data/pending-reverts.json
    ```
+
+   The paths in the lines `evidence_archive` and `timed_revert` are paths of the test
+   checkout.
 
 3. Run the service.
 
@@ -83,7 +93,7 @@ Do these steps in the root of the repository.
 
 5. Open `http://127.0.0.1:8080/` in a browser on the same host. Put the token in the
    field **API token**. Select **Use the token**.
-6. Select **Incidents**. The list shows one critical incident with 8 detections.
+6. Select **Incidents**. The list shows one critical incident with 9 detections.
 7. Select **Approvals**. Two requests for `disable_service_principal` wait. One came from
    the Responder agent. One came from the playbook `contain-rogue-service-principal`.
 8. Approve one request and reject the other one. The result of the approved request is
@@ -91,7 +101,7 @@ Do these steps in the root of the repository.
 9. Press Ctrl-C in the terminal of the service. The service stops and prints its counts.
 
    ```text
-   AEGIS stopped. Events examined: 648. Detections: 8. Incident changes: 7. Playbook runs: 4.
+   AEGIS stopped. Events examined: 648. Detections: 9. Incident changes: 7. Playbook runs: 4.
    ```
 
 10. Check the audit log.
@@ -102,7 +112,7 @@ Do these steps in the root of the repository.
 
     ```text
     Audit log examples/offline-demo/data/audit.jsonl
-      Records checked: 162
+      Records checked: 163
       Chain: valid
     ```
 
@@ -132,15 +142,15 @@ same `AEGIS_TOKEN_ALICE` value.
    ```json
    "disposition": {
        "executed": {
-           "action_id": "01a1ed46-d037-72c6-9071-953c8ae68626",
+           "action_id": "01a1f040-7f4d-71b8-af1f-8fa6135c9414",
            "status": "simulated",
            "connector": "simulation",
            "message": "Dry run: a connector for disable_service_principal would act on sp-sync-helper. No connector is configured for this action. Nothing changed.",
            "details": {
                "configured_connector": false
            },
-           "reversible": false,
-           "completed_at": "2026-11-18T06:10:18.548633Z"
+           "reversible": true,
+           "completed_at": "2026-11-18T20:02:01.753555Z"
        }
    }
    ```

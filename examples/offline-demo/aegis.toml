@@ -53,8 +53,18 @@ dry_run = true
 playbooks = "dry_run"
 playbook_dir = "../../playbooks"
 
+# The timed revert. The file holds the pending reverts. With the dry run above, no action
+# has a pending revert.
+[response.revert]
+store = "data/pending-reverts.json"
+
 [ingest]
 checkpoint_dir = "data/checkpoints"
+
+# The evidence archive: each detection, the events that caused it, and each state of an
+# incident. The commands `aegis report abuse` and `aegis indicators export` read it.
+[evidence]
+path = "data/evidence.jsonl"
 
 # The recorded attack log of the repository: 648 normalized events.
 [[sources]]

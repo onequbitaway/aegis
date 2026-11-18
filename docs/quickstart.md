@@ -75,7 +75,7 @@ that file. The output has five parts.
 ```text
 AEGIS demonstration: replay of the recorded attack log: 648 events, dry run, no model
 
-Detections (8)
+Detections (9)
   2026-11-03T09:10:00.450Z  high           malicious   T1110.003               Sign-in burst from one address  [aegis.velocity.sign_in_burst]
   2026-11-03T09:10:31.000Z  high           malicious   T1078                   Successful sign-in after a sign-in burst  [aegis.velocity.sign_in_after_burst]
   2026-11-03T09:10:37.000Z  high           malicious   T1528                   Consent to privileged application permissions  [5b0f3c2e-8a41-4d6f-9c57-2e1a7b90d314]
@@ -83,12 +83,13 @@ Detections (8)
   2026-11-03T09:10:46.000Z  high           malicious   T1098.003               Privileged role assigned by a workload identity  [a4d7e1b9-6c35-4f02-8e7a-1b9c0d5f2a63]
   2026-11-03T09:10:46.000Z  high           malicious   T1098.003               Workload identity gave itself a privileged role  [aegis.velocity.privileged_self_assignment]
   2026-11-03T09:10:52.000Z  high           malicious   T1078.004               Principal acts from two places at an impossible speed  [aegis.velocity.impossible_speed]
+  2026-11-03T09:10:52.000Z  high           malicious   T1059.009               Chain of sensitive actions at machine speed  [aegis.velocity.machine_cadence]
   2026-11-03T09:11:15.000Z  critical       malicious   T1552                   Honeytoken used  [0c9e4f7a-2b6d-4e18-a3f5-7d21c6b8e940]
 
 Incidents (1)
-  508657f7-d921-8cb3-add4-c2bd62528abd  critical       investigating   Multi-stage attack: 7 ATT&CK techniques in 8 detections
-      Detections: 8
-      Techniques: T1110.003, T1078, T1528, T1098.001, T1098.003, T1078.004, T1552
+  508657f7-d921-8cb3-add4-c2bd62528abd  critical       investigating   Multi-stage attack: 8 ATT&CK techniques in 9 detections
+      Detections: 9
+      Techniques: T1110.003, T1078, T1528, T1098.001, T1098.003, T1078.004, T1059.009, T1552
       Entities:   ip_address 203.0.113.50; user user-dana; application app-sync-helper; service_principal sp-sync-helper; ip_address 203.0.113.51; ip_address 192.0.2.77; secret kv-prod/legacy-admin-password
 
 Actions (23)
@@ -124,8 +125,8 @@ Playbooks (4)
   respond-to-honeytoken-trip: 5 requests, 0 failures
 
 Audit log
-  Records: 155
-  Records checked: 155
+  Records: 156
+  Records checked: 156
   Chain: valid
   File: /var/folders/y_/frr890zj6p31j54nbf6cd50h0000gp/T/aegis-demo-w7ltJU/data/audit.jsonl
 
@@ -162,7 +163,7 @@ not 600.
 
 ### Incidents
 
-The correlator put the eight detections in one incident, because they share entities.
+The correlator put the nine detections in one incident, because they share entities.
 The incident is `critical`, because it has three or more ATT&CK techniques. The state is
 `investigating`: the Analyst agent confirmed the attack.
 
@@ -183,8 +184,9 @@ example `block_ip` on `203.0.113.50`.
 
 ### Playbooks
 
-Four of the five sample playbooks matched the incident. A failure is a step that sent no
-request or got an error.
+Four of the six sample playbooks matched the incident. A failure is a step that sent no
+request or got an error. The reversible containment steps of the playbooks have a revert
+time. In a dry run, a revert time has no effect. Refer to [response.md](response.md).
 
 ### Audit log
 
@@ -206,12 +208,14 @@ uses the directory `/tmp/aegis-quickstart`. You can use a different directory.
    ```
 
    ```text
-   Wrote 24 files to /tmp/aegis-quickstart:
+   Wrote 28 files to /tmp/aegis-quickstart:
      /tmp/aegis-quickstart/aegis.toml
      /tmp/aegis-quickstart/detections/aegis-identity/indicators/examples.yml
      /tmp/aegis-quickstart/detections/aegis-identity/pack.yml
      /tmp/aegis-quickstart/detections/aegis-identity/rules/account_locked_after_failed_sign_ins.yml
      /tmp/aegis-quickstart/detections/aegis-identity/rules/consent_to_privileged_permissions.yml
+     /tmp/aegis-quickstart/detections/aegis-identity/rules/decoy_canary_hit.yml
+     /tmp/aegis-quickstart/detections/aegis-identity/rules/decoy_contact.yml
      /tmp/aegis-quickstart/detections/aegis-identity/rules/honeytoken_used.yml
      /tmp/aegis-quickstart/detections/aegis-identity/rules/legacy_mail_protocol_sign_in.yml
      /tmp/aegis-quickstart/detections/aegis-identity/rules/mfa_method_changed_by_script_client.yml
@@ -222,6 +226,7 @@ uses the directory `/tmp/aegis-quickstart`. You can use a different directory.
      /tmp/aegis-quickstart/policies/README.md
      /tmp/aegis-quickstart/policies/default.rego
      /tmp/aegis-quickstart/policies/examples/auto_contain_service_principals.rego
+     /tmp/aegis-quickstart/policies/examples/contain_first_with_timed_revert.rego
      /tmp/aegis-quickstart/policies/examples/maintenance_window.rego
      /tmp/aegis-quickstart/policies/examples/protected_entities.rego
      /tmp/aegis-quickstart/policies/examples/protected_entities.yaml
@@ -230,6 +235,7 @@ uses the directory `/tmp/aegis-quickstart`. You can use a different directory.
      /tmp/aegis-quickstart/playbooks/contain-compromised-user.yaml
      /tmp/aegis-quickstart/playbooks/contain-rogue-service-principal.yaml
      /tmp/aegis-quickstart/playbooks/isolate-compromised-host.yaml
+     /tmp/aegis-quickstart/playbooks/raise-friction-critical-identity-incident.yaml
      /tmp/aegis-quickstart/playbooks/respond-to-honeytoken-trip.yaml
 
    Next steps:
@@ -251,15 +257,18 @@ uses the directory `/tmp/aegis-quickstart`. You can use a different directory.
      api: off
      bus: memory
      connectors: honeytokens, simulation
+     decoy: off
      dispatcher_dry_run: true
+     evidence_archive: /tmp/aegis-quickstart/data/evidence.jsonl
      model: false
      modules: ingest, detection, monitor, hunter, analyst, responder, deception, reporter
      playbook_mode: dry_run
-     playbooks: block-password-spray-source, contain-compromised-user, contain-rogue-service-principal, isolate-compromised-host, respond-to-honeytoken-trip
+     playbooks: block-password-spray-source, contain-compromised-user, contain-rogue-service-principal, isolate-compromised-host, raise-friction-critical-identity-incident, respond-to-honeytoken-trip
      rule_pack: aegis-identity
-     rules: 9
-     sources:
+     rules: 11
+     sources: 
      storage: memory
+     timed_revert: /tmp/aegis-quickstart/data/pending-reverts.json
    ```
 
    The starter configuration has no source and no operator API. The next steps add them.
@@ -349,15 +358,18 @@ this procedure also uses a policy that makes one action type wait for a person.
       api: 127.0.0.1:8080
       bus: memory
       connectors: honeytokens, simulation
+      decoy: off
       dispatcher_dry_run: true
+      evidence_archive: /tmp/aegis-quickstart/data/evidence.jsonl
       model: false
       modules: ingest, detection, monitor, hunter, analyst, responder, deception, reporter, api
       playbook_mode: dry_run
-      playbooks: block-password-spray-source, contain-compromised-user, contain-rogue-service-principal, isolate-compromised-host, respond-to-honeytoken-trip
+      playbooks: block-password-spray-source, contain-compromised-user, contain-rogue-service-principal, isolate-compromised-host, raise-friction-critical-identity-incident, respond-to-honeytoken-trip
       rule_pack: aegis-identity
-      rules: 9
+      rules: 11
       sources: replay
       storage: memory
+      timed_revert: /tmp/aegis-quickstart/data/pending-reverts.json
     ```
 
     The lines `api` and `sources` show the two additions. If the check reports a problem,
@@ -378,19 +390,19 @@ AEGIS__TELEMETRY__LOG_LEVEL=info aegis run --config /tmp/aegis-quickstart/aegis.
 The log goes to the standard error stream:
 
 ```text
-2026-11-18T06:56:40.842778Z  INFO aegis_policy::file_log: opened the audit log path=/private/tmp/aegis-quickstart/data/audit.jsonl records=0
-2026-11-18T06:56:40.853190Z  INFO aegis_policy::rego: loaded the policy digest=2c4ae047606027ae20cb84a975f7142acf7cd7074d6afe24ba6eccadfcfe0c4d rule=data.aegis.response.decision
-2026-11-18T06:56:40.856112Z  INFO aegis::commands: AEGIS runs. Send SIGINT or SIGTERM to stop. config=/tmp/aegis-quickstart/aegis.toml
-2026-11-18T06:56:40.860762Z  INFO aegis_app::app: the service started sources=1 detection=true agents=true
-2026-11-18T06:56:40.860816Z  INFO aegis_app::api: the operator API listens address=127.0.0.1:8080
-2026-11-18T06:56:40.860891Z  INFO aegis_ingest::runner: ingestion started connector=replay resumed=false
-2026-11-18T06:56:40.861269Z  INFO aegis_api::server: the API server listens address=Some(127.0.0.1:8080)
-2026-11-18T06:56:40.972398Z  INFO aegis_ingest::runner: ingestion stopped connector=replay outcome=Completed events_published=648 batches=7 retries=0
-2026-11-18T06:56:56.799825Z  INFO aegis_policy::approval: recorded a decision approval=01a1ed71-807b-75cd-ac26-260a7fdcb34c principal=alice@example.com approve=true
-2026-11-18T06:56:58.802248Z  INFO aegis_policy::approval: recorded a decision approval=01a1ed71-809b-72e4-9779-87d6f8ea1e49 principal=alice@example.com approve=false
-2026-11-18T06:57:10.848395Z  INFO aegis_core::shutdown: stop signal received signal="SIGINT"
-2026-11-18T06:57:10.848585Z  INFO aegis_app::api: the operator API stopped address=127.0.0.1:8080
-2026-11-18T06:57:10.848627Z  INFO aegis_app::app: the service stopped
+2026-11-18T20:01:26.601190Z  INFO aegis_policy::file_log: opened the audit log path=/private/tmp/aegis-quickstart/data/audit.jsonl records=0
+2026-11-18T20:01:26.614000Z  INFO aegis_policy::rego: loaded the policy digest=2c4ae047606027ae20cb84a975f7142acf7cd7074d6afe24ba6eccadfcfe0c4d rule=data.aegis.response.decision
+2026-11-18T20:01:26.618789Z  INFO aegis::commands: AEGIS runs. Send SIGINT or SIGTERM to stop. config=/tmp/aegis-quickstart/aegis.toml
+2026-11-18T20:01:26.623409Z  INFO aegis_app::app: the service started sources=1 detection=true agents=true
+2026-11-18T20:01:26.623418Z  INFO aegis_app::api: the operator API listens address=127.0.0.1:8080
+2026-11-18T20:01:26.623474Z  INFO aegis_ingest::runner: ingestion started connector=replay resumed=false
+2026-11-18T20:01:26.624015Z  INFO aegis_api::server: the API server listens address=Some(127.0.0.1:8080)
+2026-11-18T20:01:26.749142Z  INFO aegis_ingest::runner: ingestion stopped connector=replay outcome=Completed events_published=648 batches=7 retries=0
+2026-11-18T20:01:27.387355Z  INFO aegis_policy::approval: recorded a decision approval=01a1f03f-f957-730f-9f8d-a98f6e22431a principal=alice@example.com approve=true
+2026-11-18T20:01:27.476285Z  INFO aegis_policy::approval: recorded a decision approval=01a1f03f-f95a-73ff-a409-6f3f543a553f principal=alice@example.com approve=false
+2026-11-18T20:01:27.616588Z  INFO aegis_core::shutdown: stop signal received signal="SIGINT"
+2026-11-18T20:01:27.616839Z  INFO aegis_app::api: the operator API stopped address=127.0.0.1:8080
+2026-11-18T20:01:27.616902Z  INFO aegis_app::app: the service stopped
 ```
 
 The source read the 648 events and stopped. The service continues to run. Keep this
@@ -405,7 +417,7 @@ terminal open.
 
    | Severity | State | Title | Tenant |
    | --- | --- | --- | --- |
-   | critical | investigating | Multi-stage attack: 7 ATT&CK techniques in 8 detections | tenant-contoso |
+   | critical | investigating | Multi-stage attack: 8 ATT&CK techniques in 9 detections | tenant-contoso |
 
 4. Select the title of the incident. The page shows the ATT&CK techniques, the entities,
    the timeline, the detections, and the audit records of the incident.
@@ -441,6 +453,10 @@ The console keeps the token until you close the tab. It uses no cookie.
 
 5. In the second request, select **Reject**. The result is `Rejected.` AEGIS does not
    run a rejected action.
+
+   The view also has the part **Timed reverts**. Each action of this procedure is a dry
+   run, so the part shows `No action waits for a timed revert.` Refer to
+   [response.md](response.md).
 6. Select **Audit**. The newest records include your two decisions, with your identity:
 
    ```text
@@ -457,7 +473,7 @@ You can do the same decisions with the REST API. Refer to the
 1. Go to the first terminal. Press Ctrl-C. The service stops and prints its counts.
 
    ```text
-   AEGIS stopped. Events examined: 648. Detections: 8. Incident changes: 7. Playbook runs: 4.
+   AEGIS stopped. Events examined: 648. Detections: 9. Incident changes: 7. Playbook runs: 4.
    ```
 
 2. Check the hash chain of the audit log.
@@ -468,7 +484,7 @@ You can do the same decisions with the REST API. Refer to the
 
    ```text
    Audit log /tmp/aegis-quickstart/data/audit.jsonl
-     Records checked: 162
+     Records checked: 163
      Chain: valid
    ```
 
@@ -481,22 +497,22 @@ You can do the same decisions with the REST API. Refer to the
    ```
 
    ```text
-   Audit log /tmp/aegis-quickstart/data/audit.jsonl: the newest 8 of 162 records
-       155  2026-11-18T06:56:56.794552Z  approval_decided    alice@example.com     alice@example.com approved the action disable_service_principal on sp-sync-helper.
-       156  2026-11-18T06:56:56.816963Z  policy_decision     dispatcher            Policy requires approval for the action disable_service_principal on service_principal sp-sync-helper.
-       157  2026-11-18T06:56:56.820206Z  action_executed     dispatcher            Connector simulation simulated the action disable_service_principal on service_principal sp-sync-helper. This was a dry run. Nothing changed.
-       158  2026-11-18T06:56:56.825331Z  agent_decision      responder             Incident 508657f7-d921-8cb3-add4-c2bd62528abd: disable_service_principal on service_principal:sp-sync-helper: simulated by the connector simulation. Dry run: a connector for disable_service_principal would act on sp-sync-helper. No connector is configured for this action. Nothing changed.
-       159  2026-11-18T06:56:56.829228Z  agent_decision      responder             Incident 508657f7-d921-8cb3-add4-c2bd62528abd: Containment is not complete. Of 6 actions: 0 ran, 6 were dry runs, 0 wait for approval, 0 were denied, 0 failed. The incident stays open.
-       160  2026-11-18T06:56:56.837262Z  agent_decision      reporter              The model wrote no report text for incident 508657f7-d921-8cb3-add4-c2bd62528abd: the model call failed: unavailable: no model is configured: add a [model] section to use a model. The template applies.
-       161  2026-11-18T06:56:56.841218Z  agent_decision      reporter              Wrote the report for incident 508657f7-d921-8cb3-add4-c2bd62528abd on aegis.reports.508657f7-d921-8cb3-add4-c2bd62528abd. Text source: template.
-       162  2026-11-18T06:56:58.797036Z  approval_decided    alice@example.com     alice@example.com rejected the action disable_service_principal on sp-sync-helper.
-     Records checked: 162
+   Audit log /tmp/aegis-quickstart/data/audit.jsonl: the newest 8 of 163 records
+       156  2026-11-18T20:01:27.381122Z  approval_decided    alice@example.com     alice@example.com approved the action disable_service_principal on sp-sync-helper.
+       157  2026-11-18T20:01:27.405916Z  policy_decision     dispatcher            Policy requires approval for the action disable_service_principal on service_principal sp-sync-helper.
+       158  2026-11-18T20:01:27.409444Z  action_executed     dispatcher            Connector simulation simulated the action disable_service_principal on service_principal sp-sync-helper. This was a dry run. Nothing changed.
+       159  2026-11-18T20:01:27.472933Z  approval_decided    alice@example.com     alice@example.com rejected the action disable_service_principal on sp-sync-helper.
+       160  2026-11-18T20:01:27.477621Z  agent_decision      responder             Incident 508657f7-d921-8cb3-add4-c2bd62528abd: disable_service_principal on service_principal:sp-sync-helper: denied by policy. alice@example.com rejected the approval request 01a1f03f-f95a-73ff-a409-6f3f543a553f.
+       161  2026-11-18T20:01:27.484357Z  agent_decision      responder             Incident 508657f7-d921-8cb3-add4-c2bd62528abd: Containment is not complete. Of 6 actions: 0 ran, 5 were dry runs, 0 wait for approval, 1 were denied, 0 failed. The incident stays open.
+       162  2026-11-18T20:01:27.493122Z  agent_decision      reporter              The model wrote no report text for incident 508657f7-d921-8cb3-add4-c2bd62528abd: the model call failed: unavailable: no model is configured: add a [model] section to use a model. The template applies.
+       163  2026-11-18T20:01:27.497291Z  agent_decision      reporter              Wrote the report for incident 508657f7-d921-8cb3-add4-c2bd62528abd on aegis.reports.508657f7-d921-8cb3-add4-c2bd62528abd. Text source: template.
+     Records checked: 163
      Chain: valid
    ```
 
-   Record 155 is your approval. Record 156 shows that AEGIS asked the policy again
-   before it ran the action. Record 157 is the dry run of the action. Record 162 is your
-   rejection.
+   Record 156 is your approval. Record 157 shows that AEGIS asked the policy again
+   before it ran the action. Record 158 is the dry run of the action. Record 159 is your
+   rejection. The records after it are the work of the agents after the rejection.
 
 ## Run the service again
 
@@ -519,6 +535,9 @@ The audit log continues its chain in each run.
 | Understand the components and the data flow | [architecture.md](architecture.md) |
 | Set each key of `aegis.toml` | [configuration.md](configuration.md) |
 | Write your policy | [policy.md](policy.md) |
+| Contain first, with a timed revert | [response.md](response.md) |
+| Run a decoy service | [deception.md](deception.md) |
+| Write an abuse report or export indicators | [sharing.md](sharing.md) |
 | Add a local model | [`examples/local-model`](../examples/local-model/README.md) |
 | Connect Microsoft Entra ID | [`examples/entra`](../examples/entra/README.md) |
 | Operate the service | [operations.md](operations.md) |
