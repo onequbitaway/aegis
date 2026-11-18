@@ -67,7 +67,10 @@ fn unique(kind: &str) -> String {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .subsec_nanos();
-    format!("aegis-test-app-{kind}-{}-{nanoseconds:08x}", std::process::id())
+    format!(
+        "aegis-test-app-{kind}-{}-{nanoseconds:08x}",
+        std::process::id()
+    )
 }
 
 /// A container that the test started. The container goes away with this value.
