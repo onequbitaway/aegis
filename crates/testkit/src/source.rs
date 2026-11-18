@@ -5,8 +5,8 @@ use async_trait::async_trait;
 
 /// A source connector that serves a fixed list of events.
 ///
-/// [`stream`](SourceConnector::stream) yields all events and then ends. The cursor of this
-/// connector is the number of events that the caller already has.
+/// [`stream`](SourceConnector::stream) yields all events in batches of one page and then
+/// ends. The cursor of this connector is the number of events that the caller already has.
 pub struct StaticSource {
     name: String,
     events: Vec<Event>,
@@ -55,9 +55,21 @@ impl SourceConnector for StaticSource {
     }
 
     async fn stream(&self, cursor: Option<String>) -> Result<EventStream> {
-        let offset = Self::offset(cursor.as_deref())?;
-        let events: Vec<Result<Event>> = self.events.iter().skip(offset).cloned().map(Ok).collect();
-        Ok(Box::pin(futures::stream::iter(events)))
+        let offset = Self::offset(cursor.as_deref())?.min(self.events.len());
+        let batches: Vec<Result<EventBatch>> = self
+            .events
+            .get(offset..)
+            .unwrap_or_default()
+            .chunks(self.page_size)
+            .scan(offset, |position, chunk| {
+                *position += chunk.len();
+                Some(Ok(EventBatch {
+                    events: chunk.to_vec(),
+                    next_cursor: Some(position.to_string()),
+                }))
+            })
+            .collect();
+        Ok(Box::pin(futures::stream::iter(batches)))
     }
 
     async fn fetch(&self, range: TimeRange, cursor: Option<String>) -> Result<EventBatch> {
@@ -112,23 +124,54 @@ mod tests {
 
     #[tokio::test]
     async fn stream_yields_all_events_in_time_order_and_then_ends() {
-        let source = StaticSource::new("static", events(5));
-        let times: Vec<DateTime<Utc>> = source
+        let source = StaticSource::new("static", events(5)).with_page_size(2);
+        let batches: Vec<EventBatch> = source
             .stream(None)
             .await
             .unwrap()
-            .map(|event| event.unwrap().time)
+            .map(|batch| batch.unwrap())
             .collect()
             .await;
+        let sizes: Vec<usize> = batches.iter().map(|batch| batch.events.len()).collect();
+        assert_eq!(sizes, [2, 2, 1]);
+        let cursors: Vec<Option<&str>> = batches
+            .iter()
+            .map(|batch| batch.next_cursor.as_deref())
+            .collect();
+        assert_eq!(cursors, [Some("2"), Some("4"), Some("5")]);
+        let times: Vec<DateTime<Utc>> = batches
+            .iter()
+            .flat_map(|batch| batch.events.iter().map(|event| event.time))
+            .collect();
         assert_eq!(times.len(), 5);
         assert!(times.is_sorted());
-        let resumed = source
-            .stream(Some("3".to_owned()))
+    }
+
+    #[tokio::test]
+    async fn stream_continues_after_the_cursor_of_an_earlier_batch() {
+        let source = StaticSource::new("static", events(5)).with_page_size(2);
+        let all: Vec<Event> = source.fetch(all_time(), None).await.unwrap().events;
+        let resumed: Vec<EventBatch> = source
+            .stream(Some("4".to_owned()))
+            .await
+            .unwrap()
+            .map(|batch| batch.unwrap())
+            .collect()
+            .await;
+        assert_eq!(resumed.len(), 1);
+        assert_eq!(resumed[0].events.len(), 1);
+        assert_eq!(
+            resumed[0].events[0].time,
+            fixtures::base_time() + Duration::seconds(4)
+        );
+        assert_eq!(all.len(), 2);
+        let past_the_end = source
+            .stream(Some("9".to_owned()))
             .await
             .unwrap()
             .count()
             .await;
-        assert_eq!(resumed, 2);
+        assert_eq!(past_the_end, 0);
     }
 
     #[tokio::test]

@@ -1,5 +1,8 @@
 # Rust
 /target/
+
+# Linked checkouts for parallel work
+/.worktrees/
 **/*.rs.bk
 
 # Secrets and local configuration

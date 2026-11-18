@@ -21,18 +21,25 @@ pub struct ConnectorInfo {
     pub version: String,
 }
 
-/// A stream of normalized events from a source connector.
-pub type EventStream = BoxStream<'static, Result<Event>>;
-
-/// One page of events from a batch read.
+/// A set of events from a source connector, with the cursor that continues after them.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EventBatch {
-    /// The events in this page, in time order.
+    /// The events in this batch, in time order.
     pub events: Vec<Event>,
-    /// The cursor for the next page. `None` means that the read is complete.
+    /// The cursor that continues the read after this batch.
+    ///
+    /// For [`SourceConnector::fetch`], `None` means that the read is complete. For
+    /// [`SourceConnector::stream`], `None` means that the connector cannot continue from
+    /// this position after a restart.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next_cursor: Option<String>,
 }
+
+/// A live stream of batches of normalized events from a source connector.
+///
+/// The caller saves [`EventBatch::next_cursor`] after it processes a batch. After a restart,
+/// the caller sends the saved cursor to [`SourceConnector::stream`].
+pub type EventStream = BoxStream<'static, Result<EventBatch>>;
 
 /// A telemetry input. An implementation reads one vendor system and emits normalized events.
 ///
@@ -47,8 +54,9 @@ pub trait SourceConnector: Send + Sync {
 
     /// Opens a live stream of events.
     ///
-    /// `cursor` is the value of a previous checkpoint. With `None`, the stream starts at
-    /// the present time. The stream stays open until the caller drops it or the source ends.
+    /// `cursor` is an [`EventBatch::next_cursor`] value from an earlier stream of this
+    /// connector. With `None`, the stream starts at the present time. The stream stays open
+    /// until the caller drops it or the source ends. A batch can be empty.
     async fn stream(&self, cursor: Option<String>) -> Result<EventStream>;
 
     /// Reads one page of past events in `range`.
