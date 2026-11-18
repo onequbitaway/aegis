@@ -536,7 +536,9 @@ async fn the_server_sends_a_message_again_when_no_acknowledgement_arrives() {
 #[tokio::test]
 async fn a_late_consumer_does_not_give_back_a_message_that_the_server_sent_again() {
     let (_server, mut config, root) = shared_config();
-    config.consumer.ack_wait = Duration::from_secs(3);
+    // The second consumer must still hold message 1 when the third consumer gets its
+    // message. A long `ack_wait` keeps that true on a slow test computer.
+    config.consumer.ack_wait = Duration::from_secs(8);
     let case = case_for(nats_bus(&config).await, &root);
     case.publish("events.file", "1").await;
 
