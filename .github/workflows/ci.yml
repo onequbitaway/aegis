@@ -14,6 +14,11 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  # Debug data and incremental data make the build directory larger than the disk of the
+  # runner. The tests do not need them.
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
 
 jobs:
   check:
@@ -25,6 +30,11 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
 
       - name: Install the pinned Rust toolchain
         run: rustup toolchain install
@@ -38,9 +48,9 @@ jobs:
             ~/.cargo/git/db
             target
             plugins/target
-          key: cargo-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock', 'plugins/Cargo.lock') }}
+          key: cargo-nodebug-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock', 'plugins/Cargo.lock') }}
           restore-keys: |
-            cargo-${{ runner.os }}-
+            cargo-nodebug-${{ runner.os }}-
 
       - name: Check the format
         run: cargo fmt --all --check
@@ -52,8 +62,9 @@ jobs:
       - name: Test with all features
         run: cargo test --workspace --all-features --locked
 
-      - name: Test with default features
-        run: cargo test --workspace --locked
+      # One test of aegis-core compiles only when the otlp feature is off.
+      - name: Test the core crate with default features
+        run: cargo test -p aegis-core --locked
 
       - name: Build the documentation
         run: cargo doc --workspace --no-deps --locked
