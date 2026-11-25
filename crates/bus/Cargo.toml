@@ -13,7 +13,7 @@ docker-tests = []
 
 [dependencies]
 aegis-contracts.workspace = true
-async-nats = { version = "0.52.0", default-features = false, features = ["aws-lc-rs", "jetstream", "nkeys", "server_2_10", "server_2_11", "server_2_12", "server_2_14"] }
+async-nats = { version = "0.53.0", default-features = false, features = ["aws-lc-rs", "jetstream", "nkeys", "server_2_10", "server_2_11", "server_2_12", "server_2_14"] }
 async-trait.workspace = true
 futures.workspace = true
 humantime-serde = "1.1.1"
